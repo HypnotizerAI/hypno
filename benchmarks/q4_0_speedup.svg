@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360" font-family="monospace">
+  <rect width="600" height="360" fill="#0d1117"/>
+  <text x="300" y="28" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="bold">Q4_0 Kernel: Before vs After Rewrite</text>
+
+  <!-- Before/After section -->
+  <text x="300" y="56" text-anchor="middle" fill="#8b949e" font-size="12">Element-by-element loop → Block dequantize + AVX2 FMA</text>
+
+  <!-- Size axis -->
+  <line x1="80" y1="80" x2="80" y2="320" stroke="#21262d" stroke-width="1"/>
+  <line x1="80" y1="320" x2="550" y2="320" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Y labels: GFLOPS -->
+  <text x="72" y="84" text-anchor="end" fill="#8b949e" font-size="11">50</text>
+  <text x="72" y="144" text-anchor="end" fill="#8b949e" font-size="11">40</text>
+  <text x="72" y="204" text-anchor="end" fill="#8b949e" font-size="11">30</text>
+  <text x="72" y="264" text-anchor="end" fill="#8b949e" font-size="11">20</text>
+  <text x="72" y="324" text-anchor="end" fill="#8b949e" font-size="11">0</text>
+
+  <!-- Each shape pair: before (red) and after (green) -->
+
+  <!-- [512×1024]: before 4.0 → after 27.7 -->
+  <!-- 4.0/50*240=19.2 → y=300.8; 27.7/50*240=133.0 → y=187.0 -->
+  <rect x="110" y="301" width="18" height="19" fill="#f85149" rx="2"/>
+  <rect x="132" y="187" width="18" height="133" fill="#3fb950" rx="2"/>
+  <text x="130" y="340" text-anchor="middle" fill="#8b949e" font-size="10">512×1024</text>
+  <text x="130" y="178" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold">7.0×</text>
+
+  <!-- [1024×4096]: before 4.3 → after 42.6 -->
+  <!-- 4.3/50*240=20.6 → y=299.4; 42.6/50*240=204.5 → y=115.5 -->
+  <rect x="210" y="299" width="18" height="21" fill="#f85149" rx="2"/>
+  <rect x="232" y="115" width="18" height="205" fill="#3fb950" rx="2"/>
+  <text x="230" y="340" text-anchor="middle" fill="#8b949e" font-size="10">1024×4096</text>
+  <text x="230" y="106" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold">10.0×</text>
+
+  <!-- [4096×4096]: before 4.3 → after 45.7 -->
+  <!-- 4.3/50*240=20.6 → y=299.4; 45.7/50*240=219.4 → y=100.6 -->
+  <rect x="310" y="299" width="18" height="21" fill="#f85149" rx="2"/>
+  <rect x="332" y="101" width="18" height="219" fill="#3fb950" rx="2"/>
+  <text x="330" y="340" text-anchor="middle" fill="#8b949e" font-size="10">4096×4096</text>
+  <text x="330" y="92" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold">10.7×</text>
+
+  <!-- [4096×14336]: before 4.3 → after 46.4 -->
+  <rect x="410" y="299" width="18" height="21" fill="#f85149" rx="2"/>
+  <rect x="432" y="97" width="18" height="223" fill="#3fb950" rx="2"/>
+  <text x="430" y="340" text-anchor="middle" fill="#8b949e" font-size="10">llama-ffn</text>
+  <text x="430" y="88" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold">10.9×</text>
+
+  <!-- Legend -->
+  <rect x="100" y="355" width="10" height="10" fill="#f85149" rx="2"/>
+  <text x="115" y="358" fill="#8b949e" font-size="9">Before (element-by-element)</text>
+  <rect x="280" y="355" width="10" height="10" fill="#3fb950" rx="2"/>
+  <text x="295" y="358" fill="#8b949e" font-size="9">After (block dequantize + FMA)</text>
+</svg>

@@ -6,7 +6,7 @@ labels: enhancement
 assignees: ''
 ---
 
-**What do you want HYPNO to do?**
+**What do you want Hypno to do?**
 A clear description of the feature.
 
 **Why?**

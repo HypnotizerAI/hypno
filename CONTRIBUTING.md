@@ -1,4 +1,4 @@
-# Contributing to HYPNO
+# Contributing to Hypno
 
 Heck yes — you want to contribute. Here's how.
 

@@ -22,5 +22,5 @@ Email [207921092+Hot-Coco@users.noreply.github.com](mailto:207921092+Hot-Coco@us
 
 ## Out of scope
 
-- Model hallucinations, prompt injection, jailbreaking — these are ML problems, not HYPNO bugs
+- Model hallucinations, prompt injection, jailbreaking — these are ML problems, not Hypno bugs
 - Performance DoS via extremely large models (that's what resource limits are for)

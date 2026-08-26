@@ -9,7 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// Determine actual storage dtype: small 1D tensors stay FP32 even when quantizing.
-fn effective_dtype(target_dtype: DType, n_elems: usize) -> DType {
+pub fn effective_dtype(target_dtype: DType, n_elems: usize) -> DType {
     if n_elems <= 4096 && target_dtype != DType::FP32 && target_dtype != DType::FP16 {
         DType::FP32
     } else {
@@ -326,8 +326,8 @@ pub fn validate(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Convert BF16 (brain floating point) to f32.
-fn bf16_to_f32(bf: u16) -> f32 {
+/// Convert BF16 (brain floating point) to f32 (also used by lora module).
+pub fn bf16_to_f32(bf: u16) -> f32 {
     // BF16 has the same exponent range as f32 but only 7 mantissa bits
     // To convert: shift left by 16 bits (fill mantissa with zeros)
     f32::from_bits((bf as u32) << 16)

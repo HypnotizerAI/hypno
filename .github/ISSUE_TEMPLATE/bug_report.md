@@ -18,7 +18,7 @@ What happened and what you expected.
 - OS: [e.g. Ubuntu 24.04, macOS 15, Windows 11]
 - CPU: [e.g. Intel i9-13900K, Apple M2, AMD Ryzen 7950X]
 - Rust version: [`rustc --version`]
-- HYPNO commit: [`git rev-parse HEAD`]
+- Hypno commit: [`git rev-parse HEAD`]
 
 **Model info (if applicable)**
 - Architecture: [e.g. LLaMA, Mistral]

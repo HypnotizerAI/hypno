@@ -20,6 +20,6 @@ serde_json.workspace = true
 memmap2.workspace = true
 rayon.workspace = true
 env_logger.workspace = true
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
