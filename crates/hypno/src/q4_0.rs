@@ -255,8 +255,8 @@ mod tests {
     #[test]
     fn test_dot_product_exact_small() {
         // Test with exactly 32 elements
-        let x: Vec<f32> = (0..32).map(|i| 1.0f32).collect();
-        let y: Vec<f32> = (0..32).map(|i| 1.0f32).collect();
+        let x: Vec<f32> = (0..32).map(|_i| 1.0f32).collect();
+        let _y: Vec<f32> = (0..32).map(|_i| 1.0f32).collect();
 
         let mut y_q = vec![0u8; 18];
         let max_abs = 1.0;

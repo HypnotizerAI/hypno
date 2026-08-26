@@ -1,7 +1,7 @@
 //! `hypno convert` — Convert safetensors, GGUF, and LoRA to .hypno format.
 
 use clap::Parser;
-use hypno_core::DType;
+use crate::dtype::DType;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -45,13 +45,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     // LoRA-only: load adapter, convert standalone
     if args.lora_only {
         let lora_dir = args.lora_dir.clone().unwrap_or_else(|| args.model_dir.clone());
-        let adapter = hypno_convert::lora::load_lora_adapter(&lora_dir)?;
-        return hypno_convert::lora::convert_lora_standalone(&adapter, &args.out, target);
+        let adapter = crate::lora::load_lora_adapter(&lora_dir)?;
+        return crate::lora::convert_lora_standalone(&adapter, &args.out, target);
     }
 
     // LoRA merged into base model
     if let Some(ref lora_dir) = args.lora_dir {
-        let adapter = hypno_convert::lora::load_lora_adapter(lora_dir)?;
+        let adapter = crate::lora::load_lora_adapter(lora_dir)?;
         let scale = args.lora_scale.unwrap_or_else(|| adapter.lora_alpha as f32 / adapter.r as f32);
 
         // Copy base model to temp dir, merge LoRA into safetensor files
@@ -59,26 +59,26 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         copy_model_files(&args.model_dir, tmp.path())?;
         merge_lora_into_safetensors(tmp.path(), &adapter, scale)?;
 
-        let result = hypno_convert::converter::convert(tmp.path(), &args.out, target);
+        let result = crate::sft_convert::convert(tmp.path(), &args.out, target);
         if result.is_ok() && args.validate {
-            hypno_convert::converter::validate(&args.out)?;
+            crate::sft_convert::validate(&args.out)?;
         }
         return result;
     }
 
     // GGUF conversion
     if args.gguf {
-        let result = hypno_convert::gguf::convert_gguf_to_hypno(&args.model_dir, &args.out, target);
+        let result = crate::gguf::convert_gguf_to_hypno(&args.model_dir, &args.out, target);
         if result.is_ok() && args.validate {
-            hypno_convert::converter::validate(&args.out)?;
+            crate::sft_convert::validate(&args.out)?;
         }
         return result;
     }
 
     // Standard safetensors conversion
-    let result = hypno_convert::converter::convert(&args.model_dir, &args.out, target);
+    let result = crate::sft_convert::convert(&args.model_dir, &args.out, target);
     if result.is_ok() && args.validate {
-        hypno_convert::converter::validate(&args.out)?;
+        crate::sft_convert::validate(&args.out)?;
     }
     result
 }
@@ -111,10 +111,10 @@ fn copy_model_files(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
 
 fn merge_lora_into_safetensors(
     model_dir: &std::path::Path,
-    adapter: &hypno_convert::lora::LoraAdapter,
+    adapter: &crate::lora::LoraAdapter,
     scale: f32,
 ) -> anyhow::Result<()> {
-    use hypno_convert::lora::merge_lora_weights;
+    use crate::lora::merge_lora_weights;
     use std::collections::BTreeMap;
 
     // Find all safetensor files
@@ -149,7 +149,7 @@ fn merge_lora_into_safetensors(
                 }
                 safetensors::Dtype::BF16 => {
                     view.data().chunks_exact(2)
-                        .map(|c| hypno_convert::converter::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                        .map(|c| crate::sft_convert::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
                         .collect()
                 }
                 _ => continue,

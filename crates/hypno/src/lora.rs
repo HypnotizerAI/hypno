@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A parsed LoRA adapter from HuggingFace PEFT format.
 pub struct LoraAdapter {
@@ -112,7 +112,7 @@ fn load_safetensor_adapter(path: &Path) -> anyhow::Result<BTreeMap<String, (Vec<
                     .chunks_exact(2)
                     .map(|chunk| {
                         let bf = u16::from_le_bytes([chunk[0], chunk[1]]);
-                        crate::converter::bf16_to_f32(bf)
+                        crate::sft_convert::bf16_to_f32(bf)
                     })
                     .collect()
             }
@@ -187,9 +187,10 @@ pub fn merge_lora_weights(
 pub fn convert_lora_standalone(
     lora: &LoraAdapter,
     out_path: &Path,
-    target_dtype: hypno_core::DType,
+    target_dtype: crate::dtype::DType,
 ) -> anyhow::Result<()> {
-    use hypno_core::{DType, HypnoHeader, MetaKV, TensorMeta, ALIGNMENT};
+    use crate::dtype::DType;
+use crate::format::{HypnoHeader, MetaKV, TensorMeta, ALIGNMENT};
     use std::io::{BufWriter, Write};
 
     let mut metadata_kvs: Vec<MetaKV> = Vec::new();
@@ -232,7 +233,7 @@ pub fn convert_lora_standalone(
         let ndim = shape.len() as u32;
         let n_elems: usize = shape.iter().product();
         let shape_u64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
-        let edt = crate::converter::effective_dtype(target_dtype, n_elems);
+        let edt = crate::sft_convert::effective_dtype(target_dtype, n_elems);
         let data_len = edt.data_bytes(n_elems) as u64;
 
         tensors.push(TensorMeta {
@@ -297,10 +298,10 @@ pub fn convert_lora_standalone(
                 buffer.extend_from_slice(bytemuck::cast_slice(&f16_data));
             }
             DType::Q4_0 => {
-                buffer = hypno_quantize::quantize_f32_to_q4_0(data);
+                buffer = crate::quant::quantize_f32_to_q4_0(data);
             }
             DType::Q8_0 => {
-                buffer = hypno_quantize::quantize_f32_to_q8_0(data);
+                buffer = crate::quant::quantize_f32_to_q8_0(data);
             }
         }
 

@@ -1,8 +1,7 @@
 //! Converter: reads HuggingFace safetensors and writes `.hypno` format.
 
-use hypno_core::{
-    DType, HypnoHeader, MetaKV, TensorMeta, ALIGNMENT,
-};
+use crate::dtype::DType;
+use crate::format::{HypnoHeader, MetaKV, TensorMeta, ALIGNMENT};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -254,10 +253,10 @@ pub fn convert(model_dir: &Path, out_path: &Path, target_dtype: DType) -> anyhow
                         buffer.extend_from_slice(bytes);
                     }
                     DType::Q4_0 => {
-                        buffer = hypno_quantize::quantize_f32_to_q4_0(&src_data);
+                        buffer = crate::quant::quantize_f32_to_q4_0(&src_data);
                     }
                     DType::Q8_0 => {
-                        buffer = hypno_quantize::quantize_f32_to_q8_0(&src_data);
+                        buffer = crate::quant::quantize_f32_to_q8_0(&src_data);
                     }
                 }
 
@@ -290,7 +289,7 @@ pub fn convert(model_dir: &Path, out_path: &Path, target_dtype: DType) -> anyhow
 
 /// Validate a `.hypno` file: read back the header, verify magic bytes, check offsets.
 pub fn validate(path: &Path) -> anyhow::Result<()> {
-    let model = hypno_loader::HypnoModel::open(path)
+    let model = crate::loader::HypnoModel::open(path)
         .map_err(|e| anyhow::anyhow!("Validation failed: {}", e))?;
 
     let header = model.manifest.header;
@@ -389,7 +388,7 @@ mod tests {
         validate(&out_path).unwrap();
 
         // Check with loader
-        let model = hypno_loader::HypnoModel::open(&out_path).unwrap();
+        let model = crate::loader::HypnoModel::open(&out_path).unwrap();
         assert_eq!(model.get_metadata("architecture"), Some("LlamaForCausalLM"));
         assert_eq!(model.get_metadata("hidden_size"), Some("64"));
 
@@ -444,7 +443,7 @@ mod tests {
         validate(&out_path).unwrap();
 
         // Large tensor gets quantized, small ones stay FP32
-        let model = hypno_loader::HypnoModel::open(&out_path).unwrap();
+        let model = crate::loader::HypnoModel::open(&out_path).unwrap();
         let (data, dtype) = model.get_tensor_data("weight").unwrap();
         assert_eq!(dtype, DType::Q4_0);
         // 128*64 = 8192 elements → 256 blocks * 18 = 4608 bytes

@@ -1,16 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hypno-core",
-    "crates/hypno-convert",
-    "crates/hypno-loader",
-    "crates/hypno-inference",
-    "crates/hypno-quantize",
-    "crates/hypno-tokenizer",
-    "crates/hypno-cli",
-    "crates/hypno-bench",
-    "crates/hypno-server",
-    "crates/hypno-pull",
     "crates/hypno",
 ]
 

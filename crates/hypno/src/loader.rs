@@ -8,12 +8,11 @@
 //! - Linux / macOS: `mmap`
 //! - Windows: `CreateFileMappingW` + `MapViewOfFile`
 
-mod mmap;
+// mmap is declared in main.rs, use crate::mmap
+use crate::mmap;
 
-use hypno_core::{
-    DType, FormatError, HypnoHeader, HypnoManifest, MetaKV, TensorMeta,
-    ALIGNMENT,
-};
+use crate::dtype::DType;
+use crate::format::{FormatError, HypnoHeader, HypnoManifest, MetaKV, TensorMeta};
 use std::path::Path;
 
 /// A zero-copy view of a `.hypno` model file.
@@ -205,10 +204,11 @@ fn slice<'a>(data: *const u8, offset: usize, len: usize) -> &'a [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::ALIGNMENT;
     use std::io::Write;
 
     fn create_test_hypno() -> (Vec<u8>, tempfile::NamedTempFile) {
-        use hypno_core::quantization::Q4_0Block;
+        use crate::quant::Q4_0Block;
 
         let mut buf = Vec::new();
 

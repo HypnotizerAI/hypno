@@ -387,7 +387,7 @@ unsafe fn matmul_q4_0_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[
 }
 
 /// Scalar Q4_0 matmul: block-at-a-time dequantize → dot product.
-fn matmul_q4_0_scalar(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
+fn matmul_q4_0_scalar(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, _n: usize, m: usize) {
     const BLOCK_BYTES: usize = 18;
 
     y.par_iter_mut().enumerate().for_each(|(row, yi)| {

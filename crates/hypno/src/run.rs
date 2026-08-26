@@ -1,9 +1,10 @@
 //! `hypno run` — Interactive LLM chat engine.
 
 use clap::Parser;
-use hypno_inference::{ForwardBuffers, HypnoConfig, model_forward};
-use hypno_loader::HypnoModel;
-use hypno_tokenizer::HypnoTokenizer;
+use crate::transformer::{ForwardBuffers, HypnoConfig};
+use crate::transformer::model_forward;
+use crate::loader::HypnoModel;
+use crate::tokenizer::HypnoTokenizer;
 use std::io::{self, Write};
 use std::time::Instant;
 

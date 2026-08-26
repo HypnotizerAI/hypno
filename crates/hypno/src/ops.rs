@@ -4,7 +4,7 @@
 //! RMSNorm: AVX2 fused-reduce
 //! Softmax: AVX2 polynomial-approximated exp
 
-use hypno_core::DType;
+use crate::dtype::DType;
 
 /// Auto-dispatched FP32 matmul.
 pub fn matmul_vec(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
@@ -31,7 +31,7 @@ pub fn matmul_vec_auto(
         DType::FP16 => matmul_vec_f16(y, w, x, bias, n, m),
         DType::Q4_0 => matmul_vec_q4_0(y, w, x, bias, n, m),
         DType::Q8_0 => {
-            let w_f32: Vec<f32> = hypno_quantize::dequantize_q8_0(w);
+            let w_f32: Vec<f32> = crate::quant::dequantize_q8_0(w);
             matmul_vec(y, &w_f32, x, bias, n, m);
         }
     }

@@ -6,8 +6,7 @@
 //!
 //! Uses a trie-based approach for efficient byte-pair encoding.
 
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A single entry in the tokenizer vocabulary.
 #[derive(Debug, Clone)]
@@ -163,7 +162,7 @@ impl HypnoTokenizer {
 
     /// Create a tokenizer from metadata embedded in the `.hypno` file.
     /// The metadata should contain "tokenizer_json" with the full tokenizer.json content.
-    pub fn from_hypno_metadata(metadata: &[hypno_core::MetaKV]) -> anyhow::Result<Self> {
+    pub fn from_hypno_metadata(metadata: &[crate::format::MetaKV]) -> anyhow::Result<Self> {
         let json = metadata.iter()
             .find(|kv| kv.key == "tokenizer_json")
             .map(|kv| kv.value.clone())
@@ -315,7 +314,7 @@ fn tokenize_words(text: &str) -> Vec<String> {
                 current.clear();
             }
             // Add space as its own token
-            if let Some(&id) = None::<&u32> {
+            if let Some(&_id) = None::<&u32> {
                 // Skip — spaces are handled differently
             }
         } else if ch.is_ascii_punctuation() {

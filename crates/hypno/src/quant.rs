@@ -102,6 +102,67 @@ impl Q8_0Block {
     }
 }
 
+// ── Free functions for batch quantization/dequantization ──
+
+/// Quantize a slice of f32 values into Q4_0 blocks. len must be divisible by 32.
+pub fn quantize_f32_to_q4_0(data: &[f32]) -> Vec<u8> {
+    let n_blocks = data.len() / 32;
+    let mut out = Vec::with_capacity(n_blocks * Q4_0Block::BLOCK_BYTES);
+    let mut block = Q4_0Block { scale: half::f16::ZERO, qs: [0u8; 16] };
+    for i in 0..n_blocks {
+        block.quantize(&data[i * 32..(i + 1) * 32]);
+        out.extend_from_slice(bytemuck::bytes_of(&block));
+    }
+    out
+}
+
+/// Dequantize Q4_0 blocks back to f32. q4_data must be divisible by 18 bytes.
+pub fn dequantize_q4_0(q4_data: &[u8]) -> Vec<f32> {
+    let n_blocks = q4_data.len() / Q4_0Block::BLOCK_BYTES;
+    let mut out = vec![0.0f32; n_blocks * 32];
+    let mut tmp = [0.0f32; 32];
+    for i in 0..n_blocks {
+        let block: &Q4_0Block = bytemuck::from_bytes(
+            &q4_data[i * Q4_0Block::BLOCK_BYTES..(i + 1) * Q4_0Block::BLOCK_BYTES]
+        );
+        block.dequantize(&mut tmp);
+        out[i * 32..(i + 1) * 32].copy_from_slice(&tmp);
+    }
+    out
+}
+
+/// Quantize a slice of f32 values into Q8_0 blocks. len must be divisible by 32.
+pub fn quantize_f32_to_q8_0(data: &[f32]) -> Vec<u8> {
+    let n_blocks = data.len() / 32;
+    let mut out = Vec::with_capacity(n_blocks * Q8_0Block::BLOCK_BYTES);
+    for i in 0..n_blocks {
+        let chunk = &data[i * 32..(i + 1) * 32];
+        let max_abs = chunk.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        let scale = half::f16::from_f32(if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 });
+        let block = Q8_0Block {
+            scale,
+            qs: std::array::from_fn(|j| ((chunk[j] / scale.to_f32()).round() as i32).clamp(-127, 127).wrapping_add(128) as u8),
+        };
+        out.extend_from_slice(bytemuck::bytes_of(&block));
+    }
+    out
+}
+
+/// Dequantize Q8_0 blocks back to f32. q8_data must be divisible by 34 bytes.
+pub fn dequantize_q8_0(q8_data: &[u8]) -> Vec<f32> {
+    let n_blocks = q8_data.len() / Q8_0Block::BLOCK_BYTES;
+    let mut out = vec![0.0f32; n_blocks * 32];
+    let mut tmp = [0.0f32; 32];
+    for i in 0..n_blocks {
+        let block: &Q8_0Block = bytemuck::from_bytes(
+            &q8_data[i * Q8_0Block::BLOCK_BYTES..(i + 1) * Q8_0Block::BLOCK_BYTES]
+        );
+        block.dequantize(&mut tmp);
+        out[i * 32..(i + 1) * 32].copy_from_slice(&tmp);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

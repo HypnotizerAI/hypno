@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use half::f16;
-use hypno_inference::kernels::{cpu_features, matmul_f32, matmul_q4_0, matmul_f16};
+use crate::kernels::{cpu_features, matmul_f32, matmul_q4_0, matmul_f16};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -116,7 +116,7 @@ fn bench_matmul_q4(n: usize, m: usize, label: &str, _threads: usize) -> BenchRes
     let w_f32: Vec<f32> = (0..total).map(|i| ((i as f32) * 1.234567).sin()).collect();
     let x: Vec<f32> = (0..m).map(|i| ((i as f32) * 0.987654).cos()).collect();
     let mut y = vec![0.0f32; n];
-    let w_q4 = hypno_quantize::quantize_f32_to_q4_0(&w_f32);
+    let w_q4 = crate::quant::quantize_f32_to_q4_0(&w_f32);
     for _ in 0..3 { matmul_q4_0(&mut y, &w_q4, &x, None, n, m); }
     let runs = 10;
     let t0 = Instant::now();
@@ -135,9 +135,9 @@ fn bench_rms_norm(dim: usize) -> BenchResult {
     let runs = 100;
     let mut x: Vec<f32> = (0..dim).map(|i| ((i as f32) * 1.234).sin()).collect();
     let w: Vec<f32> = vec![1.0f32; dim];
-    for _ in 0..10 { hypno_inference::kernels::rms_norm_fused(&mut x.clone(), &w, 1e-5); }
+    for _ in 0..10 { crate::kernels::rms_norm_fused(&mut x.clone(), &w, 1e-5); }
     let t0 = Instant::now();
-    for _ in 0..runs { hypno_inference::kernels::rms_norm_fused(&mut x, &w, 1e-5); }
+    for _ in 0..runs { crate::kernels::rms_norm_fused(&mut x, &w, 1e-5); }
     let elapsed = t0.elapsed().as_secs_f64() / runs as f64;
     BenchResult { name: format!("RMSNorm     dim={}", dim), category: "norm".into(), gflops: 3.0 * dim as f64 / elapsed / 1e9, bandwidth_gbps: (dim * 8) as f64 / elapsed / 1e9, time_ms: elapsed * 1000.0, elements_processed: (dim * runs) as u64, ops_per_element: 3, dtype_label: "FP32".into(), matrix_shape: dim.to_string(), speedup_vs_scalar: 1.0 }
 }
@@ -145,9 +145,9 @@ fn bench_rms_norm(dim: usize) -> BenchResult {
 fn bench_softmax(dim: usize) -> BenchResult {
     let runs = 100;
     let mut x: Vec<f32> = (0..dim).map(|i| ((i as f32) * 0.01).sin()).collect();
-    for _ in 0..10 { hypno_inference::kernels::softmax_fast(&mut x.clone()); }
+    for _ in 0..10 { crate::kernels::softmax_fast(&mut x.clone()); }
     let t0 = Instant::now();
-    for _ in 0..runs { hypno_inference::kernels::softmax_fast(&mut x); }
+    for _ in 0..runs { crate::kernels::softmax_fast(&mut x); }
     let elapsed = t0.elapsed().as_secs_f64() / runs as f64;
     BenchResult { name: format!("Softmax     dim={}", dim), category: "softmax".into(), gflops: 5.0 * dim as f64 / elapsed / 1e9, bandwidth_gbps: (dim * 4) as f64 / elapsed / 1e9, time_ms: elapsed * 1000.0, elements_processed: (dim * runs) as u64, ops_per_element: 5, dtype_label: "FP32".into(), matrix_shape: dim.to_string(), speedup_vs_scalar: 1.0 }
 }
@@ -155,9 +155,9 @@ fn bench_softmax(dim: usize) -> BenchResult {
 fn bench_quantize(n: usize) -> BenchResult {
     let data: Vec<f32> = (0..n).map(|i| ((i as f32) * 1.234).sin()).collect();
     let runs = 20;
-    for _ in 0..5 { hypno_quantize::quantize_f32_to_q4_0(&data[..1024]); }
+    for _ in 0..5 { crate::quant::quantize_f32_to_q4_0(&data[..1024]); }
     let t0 = Instant::now();
-    for _ in 0..runs { let _ = hypno_quantize::quantize_f32_to_q4_0(&data); }
+    for _ in 0..runs { let _ = crate::quant::quantize_f32_to_q4_0(&data); }
     let elapsed = t0.elapsed().as_secs_f64() / runs as f64;
     let throughput = n as f64 / elapsed;
     BenchResult { name: format!("Quantize Q4_0  {:.1}M elems", n as f64 / 1e6), category: "quantize".into(), gflops: throughput / 1e9 * 5.0, bandwidth_gbps: (n * 4) as f64 / elapsed / 1e9, time_ms: elapsed * 1000.0, elements_processed: (n * runs) as u64, ops_per_element: 5, dtype_label: "Q4_0".into(), matrix_shape: n.to_string(), speedup_vs_scalar: 1.0 }
@@ -165,8 +165,8 @@ fn bench_quantize(n: usize) -> BenchResult {
 
 fn bench_accuracy(n: usize) -> BenchResult {
     let data: Vec<f32> = (0..n).map(|i| ((i as f32) * 1.234567).sin()).collect();
-    let q4 = hypno_quantize::quantize_f32_to_q4_0(&data);
-    let recovered = hypno_quantize::dequantize_q4_0(&q4);
+    let q4 = crate::quant::quantize_f32_to_q4_0(&data);
+    let recovered = crate::quant::dequantize_q4_0(&q4);
     let mut mae = 0.0f64;
     for i in 0..data.len() { mae += (data[i] as f64 - recovered[i] as f64).abs(); }
     mae /= data.len() as f64;

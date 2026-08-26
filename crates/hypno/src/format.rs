@@ -1,4 +1,4 @@
-use crate::DType;
+use crate::dtype::DType;
 
 /// Magic bytes for `.hypno` files: "HYPN" in ASCII.
 pub const MAGIC_BYTES: [u8; 4] = [0x48, 0x59, 0x50, 0x4E];

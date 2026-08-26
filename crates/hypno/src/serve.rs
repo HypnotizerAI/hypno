@@ -8,9 +8,10 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use hypno_inference::{model_forward, ForwardBuffers, HypnoConfig};
-use hypno_loader::HypnoModel;
-use hypno_tokenizer::HypnoTokenizer;
+use crate::transformer::{ForwardBuffers, HypnoConfig};
+use crate::transformer::model_forward;
+use crate::loader::HypnoModel;
+use crate::tokenizer::HypnoTokenizer;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{

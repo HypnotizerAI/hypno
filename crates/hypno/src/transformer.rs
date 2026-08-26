@@ -3,9 +3,9 @@
 //! Memory-mapped model weights, flat contiguous KV cache (FP16 optional),
 //! fused residual+RMSNorm, SIMD attention scores.
 
-use hypno_core::DType;
-use hypno_loader::HypnoModel;
-use crate::{ops, kernels};
+use crate::dtype::DType;
+use crate::loader::HypnoModel;
+use crate::ops;
 
 /// KV cache precision: FP16 halves memory with negligible quality loss.
 #[derive(Debug, Clone, Copy, PartialEq)]

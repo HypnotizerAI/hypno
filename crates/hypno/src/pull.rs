@@ -86,13 +86,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("🔄 Converting to {} ({})...", out_path, args.quantize);
 
     let target = match args.quantize.to_uppercase().as_str() {
-        "FP32" => hypno_core::DType::FP32, "FP16" => hypno_core::DType::FP16,
-        "Q8_0" => hypno_core::DType::Q8_0, "Q4_0" => hypno_core::DType::Q4_0,
+        "FP32" => crate::dtype::DType::FP32, "FP16" => crate::dtype::DType::FP16,
+        "Q8_0" => crate::dtype::DType::Q8_0, "Q4_0" => crate::dtype::DType::Q4_0,
         other => anyhow::bail!("Unknown quantize format: {}", other),
     };
 
-    hypno_convert::converter::convert(&model_dir, Path::new(&out_path), target)?;
-    hypno_convert::converter::validate(Path::new(&out_path))?;
+    crate::sft_convert::convert(&model_dir, Path::new(&out_path), target)?;
+    crate::sft_convert::validate(Path::new(&out_path))?;
 
     if !args.keep {
         println!("🧹 Cleaning up...");

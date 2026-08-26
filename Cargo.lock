@@ -724,14 +724,9 @@ dependencies = [
  "env_logger",
  "futures-util",
  "half",
- "hypno-convert",
- "hypno-core",
- "hypno-inference",
- "hypno-loader",
- "hypno-quantize",
- "hypno-tokenizer",
  "indicatif",
  "log",
+ "memmap2",
  "parking_lot",
  "rayon",
  "reqwest",
@@ -739,149 +734,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-stream",
-]
-
-[[package]]
-name = "hypno-bench"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hypno-core",
- "hypno-inference",
- "hypno-loader",
- "hypno-quantize",
- "rayon",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hypno-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
- "hypno-core",
- "hypno-inference",
- "hypno-loader",
- "hypno-tokenizer",
- "rayon",
-]
-
-[[package]]
-name = "hypno-convert"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "clap",
- "env_logger",
- "half",
- "hypno-core",
- "hypno-loader",
- "hypno-quantize",
- "memmap2",
- "rayon",
- "safetensors",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hypno-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "thiserror",
-]
-
-[[package]]
-name = "hypno-inference"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hypno-core",
- "hypno-loader",
- "hypno-quantize",
- "parking_lot",
- "rayon",
- "thiserror",
-]
-
-[[package]]
-name = "hypno-loader"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hypno-core",
- "memmap2",
- "parking_lot",
- "tempfile",
- "thiserror",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "hypno-pull"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures-util",
- "indicatif",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "hypno-quantize"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hypno-core",
- "rayon",
-]
-
-[[package]]
-name = "hypno-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "env_logger",
- "hypno-core",
- "hypno-inference",
- "hypno-loader",
- "hypno-tokenizer",
- "log",
- "parking_lot",
- "rayon",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "hypno-tokenizer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hypno-core",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1820,7 +1675,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

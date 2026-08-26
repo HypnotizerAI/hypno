@@ -8,9 +8,26 @@
 //! hypno bench                              # kernel benchmarks
 //! ```
 
+// ── Library modules ──
+pub mod dtype;
+pub mod format;
+pub mod quant;
+pub mod q4_0;
+pub mod q8_0;
+pub mod loader;
+pub mod mmap;
+pub mod kernels;
+pub mod ops;
+pub mod transformer;
+pub mod tokenizer;
+pub mod sft_convert;
+pub mod gguf;
+pub mod lora;
+
+// ── CLI subcommands ──
 mod run;
 mod serve;
-mod convert;
+mod convert_cmd;
 mod pull;
 mod bench;
 
@@ -28,7 +45,7 @@ enum Commands {
     /// Download a model from HuggingFace Hub and convert to .hypno
     Pull(pull::Args),
     /// Convert safetensors, GGUF, or LoRA adapters to .hypno format
-    Convert(convert::Args),
+    Convert(convert_cmd::Args),
     /// Interactive chat with a .hypno model
     Run(run::Args),
     /// Start an OpenAI-compatible HTTP API server
@@ -44,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Pull(args) => pull::run(args).await,
-        Commands::Convert(args) => convert::run(args),
+        Commands::Convert(args) => convert_cmd::run(args),
         Commands::Run(args) => run::run(args),
         Commands::Serve(args) => serve::run(args).await,
         Commands::Bench(args) => bench::run(args),

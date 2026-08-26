@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use hypno_core::{DType, ALIGNMENT};
+use crate::dtype::DType;
+use crate::format::ALIGNMENT;
 
 /// GGUF magic bytes: "GGUF" in little-endian u32.
 const GGUF_MAGIC: u32 = 0x46554747;
@@ -269,13 +270,13 @@ fn parse_gguf(file_path: &Path) -> anyhow::Result<(GgufHeader, BTreeMap<String, 
 pub fn convert_gguf_to_hypno(
     gguf_path: &Path,
     out_path: &Path,
-    target_dtype: DType,
+    _target_dtype: DType,
 ) -> anyhow::Result<()> {
-    use hypno_core::{HypnoHeader, MetaKV, TensorMeta};
+    use crate::format::{HypnoHeader, MetaKV, TensorMeta};
     use std::io::{BufWriter, Write};
 
     println!("Reading GGUF file: {}", gguf_path.display());
-    let (header, metadata, tensor_info, file_data) = parse_gguf(gguf_path)?;
+    let (_header, metadata, tensor_info, file_data) = parse_gguf(gguf_path)?;
 
     // Extract config metadata for .hypno format
     let mut model_kvs: Vec<MetaKV> = Vec::new();
@@ -376,7 +377,7 @@ pub fn convert_gguf_to_hypno(
         let ndim = t.dims.len() as u32;
         let n_elems: usize = t.dims.iter().map(|&d| d as usize).product();
         let hypno_dt = ggml_to_hypno_dtype(t.ggml_type)
-            .map(|dt| crate::converter::effective_dtype(dt, n_elems))
+            .map(|dt| crate::sft_convert::effective_dtype(dt, n_elems))
             .unwrap_or(DType::FP32); // Dequantized to FP32
 
         let data_len = hypno_dt.data_bytes(n_elems) as u64;
@@ -521,7 +522,7 @@ fn dequantize_ggml_generic(data: &[u8], ggml_type: u32) -> anyhow::Result<Vec<f3
             let mut result = vec![0.0f32; n];
             for i in 0..n {
                 let bf = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
-                result[i] = crate::converter::bf16_to_f32(bf);
+                result[i] = crate::sft_convert::bf16_to_f32(bf);
             }
             Ok(result)
         }
