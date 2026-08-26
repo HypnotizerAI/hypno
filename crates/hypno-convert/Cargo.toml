@@ -9,6 +9,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "Convert HuggingFace safetensors, GGUF, and LoRA adapters to .hypno format"
 
+[lib]
+name = "hypno_convert"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hypno-convert"
 path = "src/main.rs"

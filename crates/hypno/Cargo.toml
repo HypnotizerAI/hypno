@@ -1,0 +1,40 @@
+[package]
+name = "hypno"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Fast local LLM inference — one binary for chat, server, conversion, and model downloads"
+
+[[bin]]
+name = "hypno"
+path = "src/main.rs"
+
+[dependencies]
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
+hypno-convert = { version = "0.1.0", path = "../hypno-convert" }
+hypno-loader = { version = "0.1.0", path = "../hypno-loader" }
+hypno-inference = { version = "0.1.0", path = "../hypno-inference" }
+hypno-quantize = { version = "0.1.0", path = "../hypno-quantize" }
+hypno-tokenizer = { version = "0.1.0", path = "../hypno-tokenizer" }
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["json"] }
+tokio-stream = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+indicatif = "0.17"
+futures-util = "0.3"
+safetensors = "0.5"
+half = { workspace = true }
+bytemuck = { workspace = true }
+tempfile = "3"

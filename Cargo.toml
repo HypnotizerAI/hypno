@@ -10,6 +10,8 @@ members = [
     "crates/hypno-cli",
     "crates/hypno-bench",
     "crates/hypno-server",
+    "crates/hypno-pull",
+    "crates/hypno",
 ]
 
 [workspace.package]
