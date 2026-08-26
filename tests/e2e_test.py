@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a synthetic HuggingFace-style model and test the full hypnotizer pipeline.
+"""Create a synthetic HuggingFace-style model and test the full hypno pipeline.
 
 This creates a minimal Llama-style model with safetensors weights,
 then converts to .hypno format and runs inference via the CLI.

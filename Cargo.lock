@@ -288,36 +288,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hypntz-bench"
+name = "hypno-bench"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
- "hypntz-core",
- "hypntz-inference",
- "hypntz-loader",
- "hypntz-quantize",
+ "hypno-core",
+ "hypno-inference",
+ "hypno-loader",
+ "hypno-quantize",
  "rayon",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "hypntz-cli"
+name = "hypno-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "env_logger",
- "hypntz-core",
- "hypntz-inference",
- "hypntz-loader",
- "hypntz-tokenizer",
+ "hypno-core",
+ "hypno-inference",
+ "hypno-loader",
+ "hypno-tokenizer",
  "rayon",
 ]
 
 [[package]]
-name = "hypntz-convert"
+name = "hypno-convert"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -325,9 +325,9 @@ dependencies = [
  "clap",
  "env_logger",
  "half",
- "hypntz-core",
- "hypntz-loader",
- "hypntz-quantize",
+ "hypno-core",
+ "hypno-loader",
+ "hypno-quantize",
  "memmap2",
  "rayon",
  "safetensors",
@@ -336,7 +336,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hypntz-core"
+name = "hypno-core"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
@@ -345,26 +345,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "hypntz-inference"
+name = "hypno-inference"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
- "hypntz-core",
- "hypntz-loader",
- "hypntz-quantize",
+ "hypno-core",
+ "hypno-loader",
+ "hypno-quantize",
  "parking_lot",
  "rayon",
  "thiserror",
 ]
 
 [[package]]
-name = "hypntz-loader"
+name = "hypno-loader"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
- "hypntz-core",
+ "hypno-core",
  "memmap2",
  "parking_lot",
  "tempfile",
@@ -373,21 +373,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "hypntz-quantize"
+name = "hypno-quantize"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
- "hypntz-core",
+ "hypno-core",
  "rayon",
 ]
 
 [[package]]
-name = "hypntz-tokenizer"
+name = "hypno-tokenizer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "hypntz-core",
+ "hypno-core",
  "serde",
  "serde_json",
  "thiserror",

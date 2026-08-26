@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hypntz-core",
-    "crates/hypntz-convert",
-    "crates/hypntz-loader",
-    "crates/hypntz-inference",
-    "crates/hypntz-quantize",
-    "crates/hypntz-tokenizer",
-    "crates/hypntz-cli",
-    "crates/hypntz-bench",
+    "crates/hypno-core",
+    "crates/hypno-convert",
+    "crates/hypno-loader",
+    "crates/hypno-inference",
+    "crates/hypno-quantize",
+    "crates/hypno-tokenizer",
+    "crates/hypno-cli",
+    "crates/hypno-bench",
 ]
 
 [workspace.package]

@@ -1,8 +1,8 @@
-# 🌀 Hypnotizer
+# 🌀 Hypno
 
 **Run LLMs on your own metal. No Python, no CUDA, no bloat.**
 
-Hypnotizer is a from-scratch inference engine for transformer models, written in pure Rust. It reads HuggingFace safetensors checkpoints, packs them into a compact `.hypno` binary format, and runs them on your CPU — with SIMD kernels that actually push silicon to its limit.
+Hypno is a from-scratch inference engine for transformer models, written in pure Rust. It reads HuggingFace safetensors checkpoints, packs them into a compact `.hypno` binary format, and runs them on your CPU — with SIMD kernels that actually push silicon to its limit.
 
 Not a wrapper around llama.cpp. Not another Python binding. Straight Rust from the metal up.
 
@@ -12,7 +12,7 @@ Not a wrapper around llama.cpp. Not another Python binding. Straight Rust from t
 
 Because shipping a 4 GB PyTorch install to do basic inference is ridiculous. Because your laptop CPU has AVX-512 registers sitting idle while Python churns through memory. Because running an LLM should feel like opening a file, not launching a Jupyter notebook.
 
-Hypnotizer loads models in under a millisecond (memory-mapped), runs quantized matmuls at FP32 speeds or faster, and fits in a single static binary.
+Hypno loads models in under a millisecond (memory-mapped), runs quantized matmuls at FP32 speeds or faster, and fits in a single static binary.
 
 ---
 
@@ -20,14 +20,14 @@ Hypnotizer loads models in under a millisecond (memory-mapped), runs quantized m
 
 | Crate | What it does |
 |---|---|
-| `hypntz-core` | `.hypno` binary format, dtype system, quantization block types |
-| `hypntz-convert` | Converts HuggingFace safetensors → `.hypno` (with optional quantization) |
-| `hypntz-loader` | Zero-copy mmap reader, direct tensor pointers, sub-ms loads |
-| `hypntz-inference` | Transformer runtime with AVX-512/AVX2/SSE4.1 auto-dispatch SIMD kernels |
-| `hypntz-quantize` | Q4_0 and Q8_0 quantization with vectorized dequantization |
-| `hypntz-tokenizer` | BPE tokenizer from HuggingFace `tokenizer.json` |
-| `hypntz-cli` | Interactive chat CLI with top-p/top-k sampling |
-| `hypntz-bench` | GFLOPS benchmark harness |
+| `hypno-core` | `.hypno` binary format, dtype system, quantization block types |
+| `hypno-convert` | Converts HuggingFace safetensors → `.hypno` (with optional quantization) |
+| `hypno-loader` | Zero-copy mmap reader, direct tensor pointers, sub-ms loads |
+| `hypno-inference` | Transformer runtime with AVX-512/AVX2/SSE4.1 auto-dispatch SIMD kernels |
+| `hypno-quantize` | Q4_0 and Q8_0 quantization with vectorized dequantization |
+| `hypno-tokenizer` | BPE tokenizer from HuggingFace `tokenizer.json` |
+| `hypno-cli` | Interactive chat CLI with top-p/top-k sampling |
+| `hypno-bench` | GFLOPS benchmark harness |
 
 ---
 
@@ -57,26 +57,26 @@ cargo build --release
 
 ```bash
 # FP32
-hypntz-convert --model-dir ./llama-2-7b --out model.hypno
+hypno-convert --model-dir ./llama-2-7b --out model.hypno
 
 # Q4_0 quantized (7× smaller)
-hypntz-convert --model-dir ./llama-2-7b --out model-q4.hypno --quantize Q4_0
+hypno-convert --model-dir ./llama-2-7b --out model-q4.hypno --quantize Q4_0
 ```
 
 ### Run it
 
 ```bash
 # One-shot
-hypnotizer-cli --model model.hypno --prompt "Once upon a time"
+hypno-cli --model model.hypno --prompt "Once upon a time"
 
 # Interactive chat
-hypnotizer-cli --model model.hypno
+hypno-cli --model model.hypno
 ```
 
 ### Benchmark
 
 ```bash
-cargo run --release --bin hypntz-bench
+cargo run --release --bin hypno-bench
 ```
 
 ---

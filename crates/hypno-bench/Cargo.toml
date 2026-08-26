@@ -1,0 +1,19 @@
+[package]
+name = "hypno-bench"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hypno-bench"
+path = "src/main.rs"
+
+[dependencies]
+hypno-core = { path = "../hypno-core" }
+hypno-inference = { path = "../hypno-inference" }
+hypno-quantize = { path = "../hypno-quantize" }
+hypno-loader = { path = "../hypno-loader" }
+half.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true

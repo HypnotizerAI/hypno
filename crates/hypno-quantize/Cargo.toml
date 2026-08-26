@@ -1,0 +1,10 @@
+[package]
+name = "hypno-quantize"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hypno-core = { path = "../hypno-core" }
+half.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true
