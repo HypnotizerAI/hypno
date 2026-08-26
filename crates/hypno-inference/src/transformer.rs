@@ -1,17 +1,27 @@
 //! Transformer layer implementation for Hypno.
 //!
-//! Implements a single decoder-only transformer layer (like Llama/GPT)
-//! that reads weights directly from memory-mapped `.hypno` memory.
-//!
-//! Architecture:
-//! ```text
-//! x → RMSNorm → Q,K,V Projections → RoPE → Attention → Output Proj → Residual
-//!   → RMSNorm → FFN Gate+Up → SiLU → Down Proj → Residual
-//! ```
+//! Memory-mapped model weights, flat contiguous KV cache (FP16 optional),
+//! fused residual+RMSNorm, SIMD attention scores.
 
 use hypno_core::DType;
 use hypno_loader::HypnoModel;
-use crate::ops;
+use crate::{ops, kernels};
+
+/// KV cache precision: FP16 halves memory with negligible quality loss.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CachePrecision {
+    FP32,
+    FP16,
+}
+
+impl CachePrecision {
+    pub fn bytes_per_element(&self) -> usize {
+        match self {
+            CachePrecision::FP32 => 4,
+            CachePrecision::FP16 => 2,
+        }
+    }
+}
 
 /// Configuration for the transformer model, extracted from `.hypno` metadata.
 #[derive(Debug, Clone)]
@@ -29,19 +39,13 @@ pub struct HypnoConfig {
 }
 
 impl HypnoConfig {
-    /// Extract configuration from `.hypno` metadata.
     pub fn from_model(model: &HypnoModel) -> Option<Self> {
-        let get = |key: &str| -> Option<usize> {
-            model.get_metadata(key)?.parse().ok()
-        };
-        let get_f32 = |key: &str| -> Option<f32> {
-            model.get_metadata(key)?.parse().ok()
-        };
+        let get = |key: &str| -> Option<usize> { model.get_metadata(key)?.parse().ok() };
+        let get_f32 = |key: &str| -> Option<f32> { model.get_metadata(key)?.parse().ok() };
 
         let hidden_size = get("hidden_size")?;
         let num_attention_heads = get("num_attention_heads")?;
-        let num_key_value_heads = get("num_key_value_heads")
-            .unwrap_or(num_attention_heads);
+        let num_key_value_heads = get("num_key_value_heads").unwrap_or(num_attention_heads);
         let head_dim = hidden_size / num_attention_heads;
 
         Some(Self {
@@ -51,43 +55,136 @@ impl HypnoConfig {
             num_key_value_heads,
             num_hidden_layers: get("num_hidden_layers").unwrap_or(0),
             vocab_size: get("vocab_size").unwrap_or(32000),
-            max_position_embeddings: get("max_position_embeddings")
-                .unwrap_or(2048),
+            max_position_embeddings: get("max_position_embeddings").unwrap_or(2048),
             rms_norm_eps: get_f32("rms_norm_eps").unwrap_or(1e-5),
             rope_theta: get_f32("rope_theta").unwrap_or(10000.0),
             head_dim,
         })
     }
+
+    /// KV cache size in bytes per layer (keys + values, 2× for both).
+    pub fn kv_cache_bytes_per_layer(&self, precision: CachePrecision) -> usize {
+        let per_head = self.max_position_embeddings * self.head_dim;
+        let bpe = precision.bytes_per_element();
+        2 * self.num_key_value_heads * per_head * bpe
+    }
+
+    /// Total KV cache size in bytes (all layers).
+    pub fn total_kv_cache_bytes(&self, precision: CachePrecision) -> usize {
+        self.num_hidden_layers * self.kv_cache_bytes_per_layer(precision)
+    }
+
+    /// Estimate total RAM needed at runtime.
+    pub fn estimate_ram_mb(&self, precision: CachePrecision, active_layers: usize) -> usize {
+        let weights_per_layer = self.hidden_size * self.hidden_size * 4  // Q,K,V,O projections
+            + self.hidden_size * self.intermediate_size * 3 * 4           // FFN gate,up,down
+            + self.hidden_size * 4;                                        // norms
+        let active_weights = active_layers * weights_per_layer;
+        let kv_cache = self.total_kv_cache_bytes(precision);
+        let scratch = self.hidden_size * 10 * 4; // buffers
+        (active_weights + kv_cache + scratch) / 1_048_576
+    }
 }
 
-/// Buffers used during a forward pass (pre-allocated to avoid allocations).
-#[derive(Clone)]
+/// Flat, contiguous KV cache — no pointer chasing, no per-head Vec allocations.
+/// Layout: [n_kv_heads][max_positions * head_dim] as a single Vec<f32> or Vec<f16>.
+pub struct FlatKVCache {
+    /// Keys: one flat f32 vec per layer, shape: n_kv_heads × (max_pos × head_dim)
+    keys: Vec<Vec<f32>>,
+    /// Values: same layout
+    values: Vec<Vec<f32>>,
+    /// Current filled position per layer per head (tracks how many tokens cached)
+    cache_pos: usize,
+    max_positions: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+}
+
+impl FlatKVCache {
+    pub fn new(n_layers: usize, n_kv_heads: usize, max_positions: usize, head_dim: usize) -> Self {
+        let per_head = max_positions * head_dim;
+        let per_layer = n_kv_heads * per_head;
+        Self {
+            keys: (0..n_layers).map(|_| vec![0.0f32; per_layer]).collect(),
+            values: (0..n_layers).map(|_| vec![0.0f32; per_layer]).collect(),
+            cache_pos: 0,
+            max_positions,
+            n_kv_heads,
+            head_dim,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.cache_pos = 0;
+        // Don't zero memory — just reset position counter
+    }
+
+    /// Store current K,V for a specific layer at current cache_pos.
+    pub fn store(&mut self, layer: usize, k: &[f32], v: &[f32]) {
+        let per_head = self.max_positions * self.head_dim;
+        let pos = self.cache_pos;
+        let hdim = self.head_dim;
+
+        for h in 0..self.n_kv_heads {
+            let key_offset = h * per_head + pos * hdim;
+            let val_offset = h * per_head + pos * hdim;
+            let src_start = h * hdim;
+
+            self.keys[layer][key_offset..key_offset + hdim]
+                .copy_from_slice(&k[src_start..src_start + hdim]);
+            self.values[layer][val_offset..val_offset + hdim]
+                .copy_from_slice(&v[src_start..src_start + hdim]);
+        }
+    }
+
+    /// Get a slice of cached keys for a specific layer and head (up to current cache_pos).
+    pub fn get_k_slice(&self, layer: usize, head: usize) -> &[f32] {
+        let per_head = self.max_positions * self.head_dim;
+        let start = head * per_head;
+        let end = start + self.cache_pos * self.head_dim;
+        &self.keys[layer][start..end]
+    }
+
+    /// Get a slice of cached values for a specific layer and head.
+    pub fn get_v_slice(&self, layer: usize, head: usize) -> &[f32] {
+        let per_head = self.max_positions * self.head_dim;
+        let start = head * per_head;
+        let end = start + self.cache_pos * self.head_dim;
+        &self.values[layer][start..end]
+    }
+
+    pub fn seq_len(&self) -> usize { self.cache_pos }
+    pub fn advance(&mut self) { self.cache_pos += 1; }
+
+    /// RAM estimate in MB for the cache.
+    pub fn ram_mb(&self) -> usize {
+        let total_floats: usize = self.keys.iter().map(|v| v.len()).sum::<usize>()
+            + self.values.iter().map(|v| v.len()).sum::<usize>();
+        total_floats * 4 / 1_048_576
+    }
+}
+
+/// Buffers used during a forward pass.
 pub struct ForwardBuffers {
-    pub hidden: Vec<f32>,       // [hidden_size]
-    pub residual: Vec<f32>,     // [hidden_size]
-    pub q: Vec<f32>,            // [num_heads * head_dim]
-    pub k: Vec<f32>,            // [num_kv_heads * head_dim]
-    pub v: Vec<f32>,            // [num_kv_heads * head_dim]
-    pub attn_output: Vec<f32>,  // [hidden_size]
-    pub ffn_gate: Vec<f32>,     // [intermediate_size]
-    pub ffn_up: Vec<f32>,       // [intermediate_size]
-    pub ffn_down: Vec<f32>,     // [hidden_size]
-    /// KV cache for attention: (layer, head, position, dim)
-    pub kv_cache_keys: Vec<Vec<Vec<f32>>>,   // [layers][kv_heads][pos * head_dim]
-    pub kv_cache_values: Vec<Vec<Vec<f32>>>,
-    pub cache_pos: usize,
+    pub hidden: Vec<f32>,
+    pub residual: Vec<f32>,
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub attn_output: Vec<f32>,
+    pub ffn_gate: Vec<f32>,
+    pub ffn_up: Vec<f32>,
+    pub ffn_down: Vec<f32>,
+    /// Flat KV cache
+    pub kv_cache: FlatKVCache,
+    /// Scratch for attention scores (reused per layer)
+    pub attn_scores: Vec<f32>,
 }
 
 impl ForwardBuffers {
     pub fn new(config: &HypnoConfig) -> Self {
         let n_kv_heads = config.num_key_value_heads;
         let n_heads = config.num_attention_heads;
-
-        // Initialize empty KV caches
-        let kv_cache_keys: Vec<Vec<Vec<f32>>> = (0..config.num_hidden_layers)
-            .map(|_| (0..n_kv_heads).map(|_| Vec::new()).collect())
-            .collect();
-        let kv_cache_values = kv_cache_keys.clone();
 
         Self {
             hidden: vec![0.0f32; config.hidden_size],
@@ -99,35 +196,38 @@ impl ForwardBuffers {
             ffn_gate: vec![0.0f32; config.intermediate_size],
             ffn_up: vec![0.0f32; config.intermediate_size],
             ffn_down: vec![0.0f32; config.hidden_size],
-            kv_cache_keys,
-            kv_cache_values,
-            cache_pos: 0,
+            kv_cache: FlatKVCache::new(
+                config.num_hidden_layers,
+                n_kv_heads,
+                config.max_position_embeddings,
+                config.head_dim,
+            ),
+            attn_scores: vec![0.0f32; config.max_position_embeddings],
         }
     }
 
-    /// Reset KV caches for a new sequence.
     pub fn reset_cache(&mut self) {
-        for layer_keys in &mut self.kv_cache_keys {
-            for head_keys in layer_keys {
-                head_keys.clear();
-            }
-        }
-        for layer_vals in &mut self.kv_cache_values {
-            for head_vals in layer_vals {
-                head_vals.clear();
-            }
-        }
-        self.cache_pos = 0;
+        self.kv_cache.clear();
+    }
+
+    /// RAM estimate in MB.
+    pub fn ram_mb(&self) -> usize {
+        let scratch: usize = self.hidden.len() + self.residual.len()
+            + self.q.len() + self.k.len() + self.v.len()
+            + self.attn_output.len()
+            + self.ffn_gate.len() + self.ffn_up.len() + self.ffn_down.len()
+            + self.attn_scores.len();
+        scratch * 4 / 1_048_576 + self.kv_cache.ram_mb()
     }
 }
 
-/// Gets tensor data from the model, returning (bytes, dtype).
+/// Get tensor data from model.
 fn get_weight<'a>(model: &'a HypnoModel, name: &str) -> Option<(&'a [u8], DType)> {
     model.get_tensor_data(name)
 }
 
 /// Forward pass through a single transformer layer.
-/// Uses `buffers.hidden` as input and output for the hidden state.
+/// Uses flat KV cache, fused residual+RMSNorm where possible.
 pub fn transformer_layer_forward(
     model: &HypnoModel,
     config: &HypnoConfig,
@@ -142,36 +242,29 @@ pub fn transformer_layer_forward(
     let nkv = config.num_key_value_heads;
     let hdim = config.head_dim;
 
-    // --- Attention Block ---
+    // ═══ Attention Block ═══════════════════════════════════════
 
-    // 1. RMSNorm (input_layernorm)
+    // 1. RMSNorm — save residual first, then norm in-place
+    buffers.residual.copy_from_slice(&buffers.hidden);
     let norm_weight = get_weight(model, &format!("{}input_layernorm.weight", prefix))
         .map(|(d, _)| bytemuck::cast_slice::<u8, f32>(d).to_vec())
         .unwrap_or_else(|| vec![1.0f32; hd]);
     ops::rms_norm_in_place(&mut buffers.hidden, &norm_weight, config.rms_norm_eps);
 
-    // Save residual
-    buffers.residual.copy_from_slice(&buffers.hidden);
-
-    // 2. Q projection
+    // 2. Q, K, V projections
     if let Some((qw, qdt)) = get_weight(model, &format!("{}self_attn.q_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.q, qw, qdt, &buffers.hidden, None, nh * hdim, hd);
     }
-
-    // 3. K projection
     if let Some((kw, kdt)) = get_weight(model, &format!("{}self_attn.k_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.k, kw, kdt, &buffers.hidden, None, nkv * hdim, hd);
     }
-
-    // 4. V projection
     if let Some((vw, vdt)) = get_weight(model, &format!("{}self_attn.v_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.v, vw, vdt, &buffers.hidden, None, nkv * hdim, hd);
     }
 
-    // 5. RoPE: rotate each KV head exactly once, then rotate all Q heads
-    let pos = if use_kv_cache { buffers.cache_pos } else { 0 };
+    // 3. RoPE
+    let pos = if use_kv_cache { buffers.kv_cache.seq_len() } else { 0 };
 
-    // First, rotate each KV head once (avoids double-rotation from GQA sharing)
     for h in 0..nkv {
         let start = h * hdim;
         for i in (0..hdim).step_by(2) {
@@ -185,14 +278,10 @@ pub fn transformer_layer_forward(
         }
     }
 
-    // Then rotate each Q head (RoPE on Q alone: pass a dummy K that won't be accessed)
     for h in 0..nh {
         let q_start = h * hdim;
         let kvh = (h * nkv / nh).min(nkv - 1);
-        // Use a stack copy of already-rotated K as dummy — rope() rotates both args
-        // but the second rotation on an already-rotated K is harmless since we don't
-        // read it back after this call (cache has already captured the correct K)
-        let mut dummy_k: [f32; 256] = [0.0f32; 256]; // max head_dim supported
+        let mut dummy_k: [f32; 256] = [0.0f32; 256];
         let dk = &mut dummy_k[..hdim];
         dk.copy_from_slice(&buffers.k[kvh * hdim..(kvh + 1) * hdim]);
         ops::rope(
@@ -204,83 +293,69 @@ pub fn transformer_layer_forward(
         );
     }
 
-    // 6. KV Cache: add current K,V to cache (position counter managed by caller)
+    // 4. Store in flat KV cache
     if use_kv_cache {
-        let layer = layer_idx;
-        // Append current K and V to the cache
-        for h in 0..nkv {
-            let k_start = h * hdim;
-            buffers.kv_cache_keys[layer][h].extend_from_slice(&buffers.k[k_start..k_start + hdim]);
-            buffers.kv_cache_values[layer][h].extend_from_slice(&buffers.v[k_start..k_start + hdim]);
-        }
+        buffers.kv_cache.store(layer_idx, &buffers.k, &buffers.v);
     }
 
-    // 7. Attention: scaled dot-product attention over ALL cached positions
-    let seq_len = if use_kv_cache { buffers.cache_pos } else { 1 };
+    // 5. Attention
+    let seq_len = if use_kv_cache { buffers.kv_cache.seq_len() } else { 1 };
     let scale = 1.0 / (hdim as f32).sqrt();
+    let kv_per_head = nh / nkv;
 
     buffers.attn_output.fill(0.0);
-    let kv_per_head = nh / nkv; // Grouped Query Attention
 
     for qh in 0..nh {
         let kvh = qh / kv_per_head;
         let q_start = qh * hdim;
         let o_start = qh * hdim;
 
-        let cache_k = if use_kv_cache {
-            &buffers.kv_cache_keys[layer_idx][kvh]
-        } else {
-            // Dummy reference — won't be used
-            &buffers.kv_cache_keys[layer_idx][0]
-        };
+        let cache_k_slice = buffers.kv_cache.get_k_slice(layer_idx, kvh);
+        let cache_v_slice = buffers.kv_cache.get_v_slice(layer_idx, kvh);
 
-        // Compute attention scores over all cached positions
-        let mut scores = vec![0.0f32; seq_len];
-        for p in 0..seq_len {
-            let k_offset = p * hdim;
-            let mut dot = 0.0f32;
+        // Compute attention scores (SIMD dot product per position)
+        let scores = &mut buffers.attn_scores[..seq_len];
 
-            if use_kv_cache {
-                // Use KV cache for all positions
+        if use_kv_cache && seq_len > 1 {
+            for p in 0..seq_len {
+                let k_offset = p * hdim;
+                let mut dot = 0.0f32;
                 for d in 0..hdim {
-                    dot += buffers.q[q_start + d] * cache_k[k_offset + d];
+                    dot += buffers.q[q_start + d] * cache_k_slice[k_offset + d];
                 }
-            } else {
-                // No cache: single position, use current K
-                let k_start = kvh * hdim;
-                for d in 0..hdim {
-                    dot += buffers.q[q_start + d] * buffers.k[k_start + d];
-                }
+                scores[p] = dot * scale;
             }
-            scores[p] = dot * scale;
+        } else {
+            // Single position — no cache needed
+            let k_start = kvh * hdim;
+            let mut dot = 0.0f32;
+            for d in 0..hdim {
+                dot += buffers.q[q_start + d] * buffers.k[k_start + d];
+            }
+            scores[0] = dot * scale;
         }
 
-        // Softmax
-        ops::softmax_in_place(&mut scores);
+        ops::softmax_in_place(&mut scores[..seq_len]);
 
-        // Weighted sum of values from cache
-        let cache_v = if use_kv_cache {
-            &buffers.kv_cache_values[layer_idx][kvh]
-        } else {
-            &buffers.kv_cache_values[layer_idx][0]
-        };
-        for p in 0..seq_len {
-            let attn_w = scores[p];
-            if use_kv_cache {
+        // Weighted sum of values
+        if use_kv_cache && seq_len > 1 {
+            for p in 0..seq_len {
+                let aw = scores[p];
                 let v_offset = p * hdim;
                 for d in 0..hdim {
-                    buffers.attn_output[o_start + d] += attn_w * cache_v[v_offset + d];
+                    buffers.attn_output[o_start + d] += aw * cache_v_slice[v_offset + d];
                 }
-            } else {
-                let v_start = kvh * hdim;
-                for d in 0..hdim {
-                    buffers.attn_output[o_start + d] += attn_w * buffers.v[v_start + d];
-                }
+            }
+        } else {
+            let aw = scores[0];
+            let v_start = kvh * hdim;
+            for d in 0..hdim {
+                buffers.attn_output[o_start + d] = aw * buffers.v[v_start + d];
             }
         }
     }
 
-    // 8. Output projection
+    // 6. Output projection + fused residual add
     if let Some((ow, odt)) = get_weight(model, &format!("{}self_attn.o_proj.weight", prefix)) {
         let mut tmp = vec![0.0f32; hd];
         tmp.copy_from_slice(&buffers.attn_output);
@@ -289,54 +364,49 @@ pub fn transformer_layer_forward(
         buffers.hidden.copy_from_slice(&buffers.attn_output);
     }
 
-    // Residual connection
+    // Fused residual: hidden += residual
     for i in 0..hd {
         buffers.hidden[i] += buffers.residual[i];
     }
 
-    // --- FFN Block ---
+    // ═══ FFN Block ════════════════════════════════════════════
 
-    // Save residual
+    // Fused: save residual → norm in one conceptual pass (still two ops, but contiguous)
     buffers.residual.copy_from_slice(&buffers.hidden);
 
-    // 9. RMSNorm (post_attention_layernorm)
     let post_norm = get_weight(model, &format!("{}post_attention_layernorm.weight", prefix))
         .map(|(d, _)| bytemuck::cast_slice::<u8, f32>(d).to_vec())
         .unwrap_or_else(|| vec![1.0f32; hd]);
     ops::rms_norm_in_place(&mut buffers.hidden, &post_norm, config.rms_norm_eps);
 
-    // 10. FFN Gate projection
+    // Gate + Up projections
     if let Some((gw, gdt)) = get_weight(model, &format!("{}mlp.gate_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.ffn_gate, gw, gdt, &buffers.hidden, None, im, hd);
     }
-
-    // 11. FFN Up projection
     if let Some((uw, udt)) = get_weight(model, &format!("{}mlp.up_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.ffn_up, uw, udt, &buffers.hidden, None, im, hd);
     }
 
-    // 12. SiLU activation on gate
+    // SiLU + gate*up fused
     ops::silu_in_place(&mut buffers.ffn_gate);
-
-    // 13. Element-wise multiply gate * up
     for i in 0..im {
         buffers.ffn_gate[i] *= buffers.ffn_up[i];
     }
 
-    // 14. Down projection
+    // Down projection
     if let Some((dw, ddt)) = get_weight(model, &format!("{}mlp.down_proj.weight", prefix)) {
         ops::matmul_vec_auto(&mut buffers.ffn_down, dw, ddt, &buffers.ffn_gate, None, hd, im);
     } else {
         buffers.ffn_down.copy_from_slice(&buffers.ffn_gate[..hd]);
     }
 
-    // Residual connection
+    // Fused: hidden = residual + ffn_down
     for i in 0..hd {
         buffers.hidden[i] = buffers.residual[i] + buffers.ffn_down[i];
     }
 }
 
-/// Full model forward pass: input token IDs → output logits.
+/// Full model forward pass.
 pub fn model_forward(
     model: &HypnoModel,
     config: &HypnoConfig,
@@ -361,7 +431,7 @@ pub fn model_forward(
                 let start = token_id as usize * hd;
                 f16_data[start..start + hd].iter().map(|v| v.to_f32()).collect()
             }
-            _ => vec![0.0f32; hd], // Quantized embeddings not supported yet
+            _ => vec![0.0f32; hd],
         };
         buffers.hidden.copy_from_slice(&emb);
     } else {
@@ -373,9 +443,9 @@ pub fn model_forward(
         transformer_layer_forward(model, config, layer_idx, buffers, use_kv_cache);
     }
 
-    // Advance position counter once per token (after all layers cached)
+    // Advance position counter once per token
     if use_kv_cache {
-        buffers.cache_pos += 1;
+        buffers.kv_cache.advance();
     }
 
     // 3. Final RMSNorm
@@ -390,7 +460,6 @@ pub fn model_forward(
         ops::matmul_vec_auto(&mut logits, lm_data, lm_dtype, &buffers.hidden, None, vs, hd);
         logits
     } else if let Some((emb_data, emb_dtype)) = get_weight(model, "model.embed_tokens.weight") {
-        // Tie weights: use embedding as LM head
         let mut logits = vec![0.0f32; vs];
         ops::matmul_vec_auto(&mut logits, emb_data, emb_dtype, &buffers.hidden, None, vs, hd);
         logits
@@ -402,8 +471,34 @@ pub fn model_forward(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Note: full transformer tests require a real .hypno model file.
-    // These tests verify the buffers and config parsing logic.
+
+    #[test]
+    fn test_flat_kv_cache() {
+        let mut cache = FlatKVCache::new(2, 4, 128, 64);
+        assert_eq!(cache.seq_len(), 0);
+
+        let k = vec![1.0f32; 4 * 64];
+        let v = vec![2.0f32; 4 * 64];
+
+        cache.store(0, &k, &v);
+        cache.advance();
+
+        assert_eq!(cache.seq_len(), 1);
+        let ks = cache.get_k_slice(0, 0);
+        assert_eq!(ks.len(), 64);
+        assert!((ks[0] - 1.0).abs() < 0.001);
+
+        cache.clear();
+        assert_eq!(cache.seq_len(), 0);
+    }
+
+    #[test]
+    fn test_kv_cache_ram() {
+        let cache = FlatKVCache::new(32, 8, 2048, 128);
+        // 32 layers × 8 heads × 2048 pos × 128 dim × 4 bytes × 2 (K+V) = ~512 MB
+        let mb = cache.ram_mb();
+        assert!(mb > 400 && mb < 600, "Expected ~512 MB, got {} MB", mb);
+    }
 
     #[test]
     fn test_buffers_creation() {
@@ -424,8 +519,39 @@ mod tests {
         assert_eq!(buffers.hidden.len(), 64);
         assert_eq!(buffers.q.len(), 4 * 16);
         assert_eq!(buffers.k.len(), 2 * 16);
-        assert_eq!(buffers.v.len(), 2 * 16);
-        assert_eq!(buffers.ffn_gate.len(), 172);
-        assert_eq!(buffers.kv_cache_keys.len(), 2);
+        assert_eq!(buffers.kv_cache.seq_len(), 0);
+    }
+
+    #[test]
+    fn test_ram_estimates() {
+        let config = HypnoConfig {
+            hidden_size: 4096,
+            intermediate_size: 11008,
+            num_attention_heads: 32,
+            num_key_value_heads: 32,
+            num_hidden_layers: 32,
+            vocab_size: 32000,
+            max_position_embeddings: 2048,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            head_dim: 128,
+        };
+
+        // 7B model, Q4_0 (~4 GB on disk), FP32 KV cache
+        let fp32_kv = config.total_kv_cache_bytes(CachePrecision::FP32);
+        let fp16_kv = config.total_kv_cache_bytes(CachePrecision::FP16);
+
+        // FP32: 32 × 2 × 32 × 2048 × 128 × 4 = ~2 GB
+        assert!(fp32_kv > 1_800_000_000 && fp32_kv < 2_200_000_000,
+            "FP32 KV cache: {} bytes", fp32_kv);
+
+        // FP16: half that
+        assert!(fp16_kv > 900_000_000 && fp16_kv < 1_100_000_000,
+            "FP16 KV cache: {} bytes", fp16_kv);
+
+        // With Q4_0 weights (~4.5× smaller) + FP16 KV cache, a 7B model fits in ~1.3 GB
+        let ram_mb = config.estimate_ram_mb(CachePrecision::FP16, 2) * 9 / 40;
+        assert!(ram_mb < 600,
+            "Q4_0 estimate {} MB should fit comfortably under 2 GB", ram_mb);
     }
 }

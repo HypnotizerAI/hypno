@@ -345,6 +345,14 @@ unsafe fn matmul_q4_0_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[
             let x_off = if block_start > row_start { block_start - row_start } else { 0 };
 
             if overlap_start == 0 && overlap_end == 32 {
+                // ▸ Prefetch next block's data while we process this one
+                if b + 1 <= last_block {
+                    let next_bo = (b + 1) * BLOCK_BYTES;
+                    let next_x_off = (b + 1) * 32 - row_start;
+                    _mm_prefetch(w_q.as_ptr().add(next_bo) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(x.as_ptr().add(next_x_off) as *const i8, _MM_HINT_T0);
+                }
+
                 // ▸ Full block: 4 × 8-wide FMA
                 let dv0 = _mm256_loadu_ps(deq.as_ptr());
                 let dv1 = _mm256_loadu_ps(deq.as_ptr().add(8));
