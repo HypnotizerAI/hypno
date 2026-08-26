@@ -1,0 +1,9 @@
+[package]
+name = "hypntz-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "hypntz-quantize"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hypntz-core = { path = "../hypntz-core" }
+half.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true

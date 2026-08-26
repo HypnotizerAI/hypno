@@ -1,0 +1,11 @@
+[package]
+name = "hypntz-tokenizer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hypntz-core = { path = "../hypntz-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
