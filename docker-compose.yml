@@ -1,0 +1,17 @@
+services:
+  hypno:
+    build: .
+    image: hypnotizerai/hypno:latest
+    volumes:
+      - ./models:/models
+      - ./data:/data
+    environment:
+      - HYPNO_MODELS_DIR=/models
+      - HYPNO_DATA_DIR=/data
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G

@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+tests/
+*.hypno
+*.safetensors
+models/
+data/
