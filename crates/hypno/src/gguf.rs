@@ -59,6 +59,7 @@ fn ggml_to_hypno_dtype(ggml_type: u32) -> Option<DType> {
 
 /// GGUF header.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct GgufHeader {
     version: u32,
     tensor_count: u64,

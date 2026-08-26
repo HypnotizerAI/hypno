@@ -39,7 +39,6 @@ pub struct Args {
 
 #[derive(Debug, Deserialize)]
 struct HfSibling {
-    #[serde(rename = "rfilename")]
     path: String,
 }
 

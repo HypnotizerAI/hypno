@@ -72,6 +72,7 @@ pub fn dot_product_q4_0_scalar(x: &[f32], y_q: &[u8], n: usize) -> f32 {
 /// SSE4.1-accelerated Q4_0 dot product using 4-wide SIMD accumulation.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
+#[allow(dead_code)]
 unsafe fn dot_product_q4_0_sse41(x: &[f32], y_q: &[u8], n: usize) -> f32 {
     use std::arch::x86_64::*;
     let n_blocks = n.div_ceil(32);
@@ -117,6 +118,7 @@ unsafe fn dot_product_q4_0_sse41(x: &[f32], y_q: &[u8], n: usize) -> f32 {
 /// AVX2-accelerated Q4_0 dot product using 8-wide SIMD accumulation.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 unsafe fn dot_product_q4_0_avx2(x: &[f32], y_q: &[u8], n: usize) -> f32 {
     use std::arch::x86_64::*;
     let n_blocks = n.div_ceil(32);
