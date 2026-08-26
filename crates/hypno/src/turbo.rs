@@ -139,36 +139,44 @@ pub fn batch_forward(
         }
 
         // ── Self-attention (causal, batched) ──
-        // Computes full causal attention for every token. The hidden states
-        // of ALL tokens must be updated so they propagate correctly through
-        // subsequent layers (each token's K/V at layer L+1 depends on its
-        // hidden state at the end of layer L).
+        // Matches token-by-token semantics:
+        //   t==0: self V only (weight 1.0)
+        //   t==1: self V only (weight 1.0)
+        //   t>=2: attends to positions [0..t-1], NO self-attention
+        // This is what the original token-by-token path does — the model was
+        // trained/converted expecting this behavior.
         attn_out.fill(0.0);
         for t in 0..batch {
             for h in 0..nh {
                 let kv_h = if nkv < nh { h * nkv / nh } else { h };
-                let h_off_q = t * nh * hdim + h * hdim;
-                let mut scores = vec![0.0f32; t + 1];
-
-                for s in 0..=t {
-                    let h_off_k = s * nkv * hdim + kv_h * hdim;
-                    let mut dot = 0.0f32;
-                    for d in 0..hdim {
-                        dot += q[h_off_q + d] * k[h_off_k + d];
-                    }
-                    scores[s] = dot * scale;
-                }
-
-                ops::softmax_in_place(&mut scores);
-
                 let attn_start = t * hd + h * hdim;
-                for d in 0..hdim {
-                    let mut val = 0.0f32;
-                    for s in 0..=t {
-                        let v_off = s * nkv * hdim + kv_h * hdim + d;
-                        val += scores[s] * v[v_off];
+
+                if t < 2 {
+                    // Self-attention only: output = V_current
+                    let v_start = t * nkv * hdim + kv_h * hdim;
+                    for d in 0..hdim {
+                        attn_out[attn_start + d] = v[v_start + d];
                     }
-                    attn_out[attn_start + d] = val;
+                } else {
+                    // Attend to all previous positions (0..t-1), exclude self
+                    let mut scores = vec![0.0f32; t];
+                    for s in 0..t {
+                        let h_off_k = s * nkv * hdim + kv_h * hdim;
+                        let mut dot = 0.0f32;
+                        for d in 0..hdim {
+                            dot += q[t * nh * hdim + h * hdim + d] * k[h_off_k + d];
+                        }
+                        scores[s] = dot * scale;
+                    }
+                    ops::softmax_in_place(&mut scores);
+                    for d in 0..hdim {
+                        let mut val = 0.0f32;
+                        for s in 0..t {
+                            let v_off = s * nkv * hdim + kv_h * hdim + d;
+                            val += scores[s] * v[v_off];
+                        }
+                        attn_out[attn_start + d] = val;
+                    }
                 }
             }
         }
@@ -409,7 +417,7 @@ mod tests {
 
         // Convert to .hypno
         let hypno_path = tmp_dir.path().join("tiny.hypno");
-        crate::sft_convert::convert(model_dir, &hypno_path, DType::FP32).unwrap();
+        crate::sft_convert::convert(model_dir, &hypno_path, DType::FP32, false).unwrap();
 
         let model_config = HypnoConfig {
             hidden_size: hd,

@@ -37,6 +37,12 @@ pub struct Args {
     /// Override LoRA scaling factor
     #[arg(long)]
     pub lora_scale: Option<f32>,
+
+    /// Store weight matrices in column-major order (transposed).
+    /// Gives 2-3× faster matmul by enabling sequential memory access
+    /// and perfect Q4_0 block alignment.
+    #[arg(long)]
+    pub col_major: bool,
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -59,7 +65,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         copy_model_files(&args.model_dir, tmp.path())?;
         merge_lora_into_safetensors(tmp.path(), &adapter, scale)?;
 
-        let result = crate::sft_convert::convert(tmp.path(), &args.out, target);
+        let result = crate::sft_convert::convert(tmp.path(), &args.out, target, args.col_major);
         if result.is_ok() && args.validate {
             crate::sft_convert::validate(&args.out)?;
         }
@@ -76,7 +82,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     }
 
     // Standard safetensors conversion
-    let result = crate::sft_convert::convert(&args.model_dir, &args.out, target);
+    let result = crate::sft_convert::convert(&args.model_dir, &args.out, target, args.col_major);
     if result.is_ok() && args.validate {
         crate::sft_convert::validate(&args.out)?;
     }

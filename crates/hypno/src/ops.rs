@@ -21,7 +21,7 @@ pub fn matmul_vec_f16(y: &mut [f32], w: &[u8], x: &[f32], bias: Option<&[f32]>, 
     crate::kernels::matmul_f16(y, w, x, bias, n, m);
 }
 
-/// Generic matmul dispatch based on weight dtype.
+/// Generic matmul dispatch based on weight dtype and layout.
 pub fn matmul_vec_auto(
     y: &mut [f32], w: &[u8], dtype: DType, x: &[f32],
     bias: Option<&[f32]>, n: usize, m: usize,
@@ -34,6 +34,17 @@ pub fn matmul_vec_auto(
             let w_f32: Vec<f32> = crate::quant::dequantize_q8_0(w);
             matmul_vec(y, &w_f32, x, bias, n, m);
         }
+    }
+}
+
+/// Column-major matmul dispatch. Uses column-major kernels for Q4_0.
+pub fn matmul_vec_col(
+    y: &mut [f32], w: &[u8], dtype: DType, x: &[f32],
+    bias: Option<&[f32]>, n: usize, m: usize,
+) {
+    match dtype {
+        DType::Q4_0 => crate::kernels::matmul_q4_0_col(y, w, x, bias, n, m),
+        _ => matmul_vec_auto(y, w, dtype, x, bias, n, m),
     }
 }
 

@@ -90,7 +90,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         other => anyhow::bail!("Unknown quantize format: {}", other),
     };
 
-    crate::sft_convert::convert(&model_dir, Path::new(&out_path), target)?;
+    crate::sft_convert::convert(&model_dir, Path::new(&out_path), target, false)?;
     crate::sft_convert::validate(Path::new(&out_path))?;
 
     if !args.keep {

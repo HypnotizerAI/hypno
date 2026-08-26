@@ -17,7 +17,7 @@ pub fn effective_dtype(target_dtype: DType, n_elems: usize) -> DType {
 }
 
 /// Convert a HuggingFace model directory to `.hypno` format.
-pub fn convert(model_dir: &Path, out_path: &Path, target_dtype: DType) -> anyhow::Result<()> {
+pub fn convert(model_dir: &Path, out_path: &Path, target_dtype: DType, col_major: bool) -> anyhow::Result<()> {
     // 1. Load config.json
     let config_path = model_dir.join("config.json");
     let config: serde_json::Value = serde_json::from_str(
@@ -85,6 +85,12 @@ pub fn convert(model_dir: &Path, out_path: &Path, target_dtype: DType) -> anyhow
     metadata_kvs.push(MetaKV { key: "max_position_embeddings".into(), value: max_position_embeddings.to_string() });
     metadata_kvs.push(MetaKV { key: "rms_norm_eps".into(), value: rms_norm_eps.to_string() });
     metadata_kvs.push(MetaKV { key: "rope_theta".into(), value: rope_theta.to_string() });
+
+    // Weight layout
+    metadata_kvs.push(MetaKV {
+        key: "weight_layout".into(),
+        value: if col_major { "col_major" } else { "row_major" }.into(),
+    });
 
     // Embed tokenizer.json if available
     if let Some(ref tj) = tokenizer_json {
@@ -382,7 +388,7 @@ mod tests {
 
         // Convert
         let out_path = tmp_dir.path().join("test.hypno");
-        convert(model_dir, &out_path, DType::FP32).unwrap();
+        convert(model_dir, &out_path, DType::FP32, false).unwrap();
 
         // Validate
         validate(&out_path).unwrap();
@@ -439,7 +445,7 @@ mod tests {
         create_large_test_safetensor(&model_dir.join("model.safetensors"));
 
         let out_path = tmp_dir.path().join("test_q4.hypno");
-        convert(model_dir, &out_path, DType::Q4_0).unwrap();
+        convert(model_dir, &out_path, DType::Q4_0, false).unwrap();
         validate(&out_path).unwrap();
 
         // Large tensor gets quantized, small ones stay FP32

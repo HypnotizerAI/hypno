@@ -158,6 +158,11 @@ impl HypnoModel {
             .find(|kv| kv.key == key)
             .map(|kv| kv.value.as_str())
     }
+
+    /// Whether this model uses column-major weight layout.
+    pub fn is_col_major(&self) -> bool {
+        self.get_metadata("weight_layout") == Some("col_major")
+    }
 }
 
 // -- Raw byte-reading helpers that work on mapped pointers --
