@@ -23,6 +23,7 @@ pub mod tokenizer;
 pub mod sft_convert;
 pub mod gguf;
 pub mod lora;
+pub mod turbo;
 
 // ── CLI subcommands ──
 mod run;

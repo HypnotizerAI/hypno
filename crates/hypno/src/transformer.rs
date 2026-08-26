@@ -156,6 +156,24 @@ impl FlatKVCache {
     pub fn seq_len(&self) -> usize { self.cache_pos }
     pub fn advance(&mut self) { self.cache_pos += 1; }
 
+    /// Store K/V at a specific position (used by batch prefill).
+    pub fn store_at(&mut self, layer: usize, k: &[f32], v: &[f32], pos: usize) {
+        let per_head = self.max_positions * self.head_dim;
+        let hdim = self.head_dim;
+        for h in 0..self.n_kv_heads {
+            let key_offset = h * per_head + pos * hdim;
+            let val_offset = h * per_head + pos * hdim;
+            let src_start = h * hdim;
+            self.keys[layer][key_offset..key_offset + hdim]
+                .copy_from_slice(&k[src_start..src_start + hdim]);
+            self.values[layer][val_offset..val_offset + hdim]
+                .copy_from_slice(&v[src_start..src_start + hdim]);
+        }
+    }
+
+    /// Set the cache position directly (used after batch prefill).
+    pub fn set_pos(&mut self, pos: usize) { self.cache_pos = pos; }
+
     /// RAM estimate in MB for the cache.
     pub fn ram_mb(&self) -> usize {
         let total_floats: usize = self.keys.iter().map(|v| v.len()).sum::<usize>()
@@ -298,8 +316,10 @@ pub fn transformer_layer_forward(
         buffers.kv_cache.store(layer_idx, &buffers.k, &buffers.v);
     }
 
-    // 5. Attention
-    let seq_len = if use_kv_cache { buffers.kv_cache.seq_len() } else { 1 };
+    // 5. Attention — include the current token's K/V alongside cached K/V
+    // so attention is over seq_len+1 positions (causal, self-attending).
+    let seq_len = if use_kv_cache { buffers.kv_cache.seq_len() } else { 0 };
+    let total_positions = seq_len + 1; // cached + current
     let scale = 1.0 / (hdim as f32).sqrt();
     let kv_per_head = nh / nkv;
 
@@ -313,53 +333,39 @@ pub fn transformer_layer_forward(
         let cache_k_slice = buffers.kv_cache.get_k_slice(layer_idx, kvh);
         let cache_v_slice = buffers.kv_cache.get_v_slice(layer_idx, kvh);
 
-        // Compute attention scores (SIMD dot product per position)
-        let scores = &mut buffers.attn_scores[..seq_len];
+        let scores = &mut buffers.attn_scores[..total_positions];
 
-        if use_kv_cache && seq_len > 1 {
-            for p in 0..seq_len {
-                let k_offset = p * hdim;
-                let mut dot = 0.0f32;
-                for d in 0..hdim {
-                    dot += buffers.q[q_start + d] * cache_k_slice[k_offset + d];
-                }
-                scores[p] = dot * scale;
+        // Scores against cached positions
+        for p in 0..seq_len {
+            let k_offset = p * hdim;
+            let mut dot = 0.0f32;
+            for d in 0..hdim {
+                dot += buffers.q[q_start + d] * cache_k_slice[k_offset + d];
             }
-        } else {
-            // Single position — no cache needed.
-            // On the very first token the cache is still empty (seq_len == 0),
-            // so the current query attends only to itself: softmax of a single
-            // element is 1.0 and there is no score slot to write. Guard the
-            // write so we never index an empty `scores` slice.
-            if seq_len > 0 {
-                let k_start = kvh * hdim;
-                let mut dot = 0.0f32;
-                for d in 0..hdim {
-                    dot += buffers.q[q_start + d] * buffers.k[k_start + d];
-                }
-                scores[0] = dot * scale;
+            scores[p] = dot * scale;
+        }
+        // Self-attention score (current token's own K)
+        let k_self_start = kvh * hdim;
+        let mut self_dot = 0.0f32;
+        for d in 0..hdim {
+            self_dot += buffers.q[q_start + d] * buffers.k[k_self_start + d];
+        }
+        scores[seq_len] = self_dot * scale;
+
+        ops::softmax_in_place(&mut scores[..total_positions]);
+
+        // Weighted sum: cached V + current V
+        for p in 0..seq_len {
+            let aw = scores[p];
+            let v_offset = p * hdim;
+            for d in 0..hdim {
+                buffers.attn_output[o_start + d] += aw * cache_v_slice[v_offset + d];
             }
         }
-
-        ops::softmax_in_place(&mut scores[..seq_len]);
-
-        // Weighted sum of values
-        if use_kv_cache && seq_len > 1 {
-            for p in 0..seq_len {
-                let aw = scores[p];
-                let v_offset = p * hdim;
-                for d in 0..hdim {
-                    buffers.attn_output[o_start + d] += aw * cache_v_slice[v_offset + d];
-                }
-            }
-        } else {
-            // seq_len == 0 is the first token attending to itself (weight 1.0);
-            // otherwise the single position's softmax weight lives in scores[0].
-            let aw = if seq_len > 0 { scores[0] } else { 1.0 };
-            let v_start = kvh * hdim;
-            for d in 0..hdim {
-                buffers.attn_output[o_start + d] = aw * buffers.v[v_start + d];
-            }
+        let self_aw = scores[seq_len];
+        let v_self_start = kvh * hdim;
+        for d in 0..hdim {
+            buffers.attn_output[o_start + d] += self_aw * buffers.v[v_self_start + d];
         }
     }
 

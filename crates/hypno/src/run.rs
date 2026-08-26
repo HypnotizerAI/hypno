@@ -4,6 +4,7 @@ use clap::Parser;
 use crate::transformer::{ForwardBuffers, HypnoConfig};
 use crate::transformer::model_forward;
 use crate::loader::HypnoModel;
+use crate::turbo;
 use crate::tokenizer::HypnoTokenizer;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -100,10 +101,8 @@ fn generate(
     let prefill_start = Instant::now();
     buffers.reset_cache();
 
-    let mut logits = Vec::new();
-    for &tid in &token_ids {
-        logits = model_forward(model, config, tid, buffers, true);
-    }
+    // Batch prefill: process all prompt tokens in a single forward pass
+    let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache);
     let prefill_elapsed = prefill_start.elapsed();
     let prompt_tps = token_ids.len() as f64 / prefill_elapsed.as_secs_f64().max(0.001);
 
@@ -158,10 +157,8 @@ fn interactive_mode(
         let token_ids = tokenizer.encode(input);
         println!("  [{} tokens]", token_ids.len());
 
-        let mut logits = Vec::new();
-        for &tid in &token_ids {
-            logits = model_forward(model, config, tid, buffers, true);
-        }
+        // Batch prefill: process all prompt tokens in a single forward pass
+        let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache);
 
         let mut rng = XorShift64::new(args.seed.wrapping_add(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
