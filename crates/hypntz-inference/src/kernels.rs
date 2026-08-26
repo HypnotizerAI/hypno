@@ -181,7 +181,7 @@ unsafe fn hsum256(v: std::arch::x86_64::__m256) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn matmul_f32_sse41(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
+unsafe fn matmul_f32_sse41(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, _n: usize, m: usize) {
     use std::arch::x86_64::*;
     let m4 = m - (m % 4);
 
@@ -211,7 +211,7 @@ unsafe fn hsum128(v: std::arch::x86_64::__m128) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn matmul_f32_avx512(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
+unsafe fn matmul_f32_avx512(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, _n: usize, m: usize) {
     use std::arch::x86_64::*;
     let m16 = m - (m % 16);
 
@@ -231,7 +231,7 @@ unsafe fn matmul_f32_avx512(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[
 
 // ── Scalar fallback ────────────────────────────────────────────────────
 
-fn matmul_f32_scalar(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
+fn matmul_f32_scalar(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, _n: usize, m: usize) {
     y.par_iter_mut().enumerate().for_each(|(r, yi)| {
         let row = &w[r * m..(r + 1) * m];
         let mut s = 0.0f32;
@@ -241,14 +241,22 @@ fn matmul_f32_scalar(y: &mut [f32], w: &[f32], x: &[f32], bias: Option<&[f32]>, 
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Q4_0 Quantized MatMul  —  dot-product directly on packed nibbles
+// Q4_0 Quantized MatMul  —  block-at-a-time dequantize → FMA dot product
 // ═══════════════════════════════════════════════════════════════════════
+//
+// Strategy: for each output row, walk only the blocks that overlap that row.
+// Dequantize each block's 32 values once into a stack buffer, then compute
+// the dot product against the corresponding x-vector segment with AVX2 FMA.
+// Interior blocks (all 32 elements in-row) take the fast 4×8-wide FMA path.
+// Boundary blocks (first/last, partial overlap) use a scalar tail.
+// This eliminates the O(rows * blocks * 32) per-element row membership check
+// that was killing performance.
 
 /// Auto-dispatched Q4_0 matrix-vector multiply.
 pub fn matmul_q4_0(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
     #[cfg(target_arch = "x86_64")]
     {
-        if cpu_features().avx2 {
+        if cpu_features().avx2 && cpu_features().fma {
             unsafe { matmul_q4_0_avx2(y, w_q, x, bias, n, m) }
             return;
         }
@@ -256,84 +264,157 @@ pub fn matmul_q4_0(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n
     matmul_q4_0_scalar(y, w_q, x, bias, n, m)
 }
 
-/// AVX2 Q4_0 matmul: dequantize on-the-fly with FMA.
+/// AVX2+FMA Q4_0 matmul: dequantize 32 values per block, then 4×8-wide FMA.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matmul_q4_0_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
     use std::arch::x86_64::*;
-    let block_bytes = 18;
-    let total_elements = n * m;
-    let total_blocks = total_elements.div_ceil(32);
+    const BLOCK_BYTES: usize = 18;
+    let total_blocks = (n * m).div_ceil(32);
 
-    if w_q.len() < total_blocks * block_bytes {
-        // Degrade gracefully
+    if w_q.len() < total_blocks * BLOCK_BYTES {
         return matmul_q4_0_scalar(y, w_q, x, bias, n, m);
     }
 
     y.par_iter_mut().enumerate().for_each(|(row, yi)| {
         let row_start = row * m;
-        let first_b = row_start / 32;
-        let last_b = ((row_start + m - 1) / 32).min(total_blocks.saturating_sub(1));
+        let row_end = row_start + m;
+        let first_block = row_start / 32;
+        let last_block = (row_end.saturating_sub(1)) / 32;
 
-        let mut acc = _mm256_setzero_ps();
-        let mut scalar_acc = 0.0f32;
+        // 4 × 256-bit accumulators for the 32-element dot product
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        let mut scalar_tail = 0.0f32;
 
-        for b in first_b..=last_b {
-            let bo = b * block_bytes;
-            let raw_scale = u16::from_le_bytes([w_q[bo], w_q[bo + 1]]);
-            let scale_f32 = f16::from_bits(raw_scale).to_f32();
-            let qs = &w_q[bo + 2..bo + 18];
+        for b in first_block..=last_block {
+            let bo = b * BLOCK_BYTES;
+            if bo + BLOCK_BYTES > w_q.len() { break; }
 
-            let elem_start = b * 32;
-            let elem_end = ((b + 1) * 32).min(total_elements);
+            // Read f16 scale, convert to f32
+            let scale = f16::from_le_bytes([w_q[bo], w_q[bo + 1]]).to_f32();
+            let qs_ptr = w_q.as_ptr().add(bo + 2);
 
-            for e in elem_start..elem_end {
-                let r = e / m;
-                if r != row { continue; }
-                let c = e % m;
-                let li = e - b * 32;
-                let byte = qs[li / 2];
-                let nib = if (li & 1) == 0 { byte & 0x0F } else { byte >> 4 };
-                let deq = (nib as i32 - 8) as f32 * scale_f32;
-                scalar_acc += x[c] * deq;
+            // ── Dequantize all 32 nibbles into a stack buffer ──────────
+            let mut deq = [0.0f32; 32];
+            {
+                let qbytes = _mm_loadu_si128(qs_ptr as *const __m128i);
+                let q16 = _mm256_cvtepu8_epi16(qbytes);          // 16 × u16  (byte → u16)
+                let lo = _mm256_and_si256(q16, _mm256_set1_epi16(0x0F));   // low nibbles
+                let hi = _mm256_srli_epi16(q16, 4);                        // high nibbles
+
+                // Convert low 8 u16 → 8 × f32, interleave into deq[0,2,4,…]
+                let lo0_128 = _mm256_castsi256_si128(lo);
+                let lo0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo0_128));
+                // Convert low high 8 u16 → 8 × f32, interleave into deq[16,18,20,…]
+                let lo1_128 = _mm256_extracti128_si256(lo, 1);
+                let lo1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo1_128));
+
+                let hi0_128 = _mm256_castsi256_si128(hi);
+                let hi0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi0_128));
+                let hi1_128 = _mm256_extracti128_si256(hi, 1);
+                let hi1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi1_128));
+
+                // Subtract zero-point (8) and scale
+                let z = _mm256_set1_ps(8.0);
+                let sc = _mm256_set1_ps(scale);
+                let lo0_f = _mm256_mul_ps(_mm256_sub_ps(lo0_i32, z), sc);
+                let lo1_f = _mm256_mul_ps(_mm256_sub_ps(lo1_i32, z), sc);
+                let hi0_f = _mm256_mul_ps(_mm256_sub_ps(hi0_i32, z), sc);
+                let hi1_f = _mm256_mul_ps(_mm256_sub_ps(hi1_i32, z), sc);
+
+                // Interleave lo/hi into deq: deq[2*i]=lo, deq[2*i+1]=hi
+                // Use _mm256_unpacklo_ps / _mm256_unpackhi_ps for interleaving
+                let pair0 = _mm256_unpacklo_ps(lo0_f, hi0_f);   // lo[0],hi[0], lo[1],hi[1], lo[2],hi[2], lo[3],hi[3]
+                let pair1 = _mm256_unpackhi_ps(lo0_f, hi0_f);   // lo[4],hi[4], lo[5],hi[5], lo[6],hi[6], lo[7],hi[7]
+                let pair2 = _mm256_unpacklo_ps(lo1_f, hi1_f);   // lo[8],hi[8], …
+                let pair3 = _mm256_unpackhi_ps(lo1_f, hi1_f);   // lo[12],hi[12], …
+
+                _mm256_storeu_ps(deq.as_mut_ptr(),         pair0);   // deq[0..8]
+                _mm256_storeu_ps(deq.as_mut_ptr().add(8),  pair1);   // deq[8..16]
+                _mm256_storeu_ps(deq.as_mut_ptr().add(16), pair2);   // deq[16..24]
+                _mm256_storeu_ps(deq.as_mut_ptr().add(24), pair3);   // deq[24..32]
+            }
+
+            // ── Determine overlap with this row ───────────────────────
+            let block_start = b * 32;
+            let overlap_start = if block_start < row_start { row_start - block_start } else { 0 };
+            let overlap_end   = if block_start + 32 > row_end { row_end - block_start } else { 32 };
+            let x_off = if block_start > row_start { block_start - row_start } else { 0 };
+
+            if overlap_start == 0 && overlap_end == 32 {
+                // ▸ Full block: 4 × 8-wide FMA
+                let dv0 = _mm256_loadu_ps(deq.as_ptr());
+                let dv1 = _mm256_loadu_ps(deq.as_ptr().add(8));
+                let dv2 = _mm256_loadu_ps(deq.as_ptr().add(16));
+                let dv3 = _mm256_loadu_ps(deq.as_ptr().add(24));
+
+                let xv0 = _mm256_loadu_ps(x.as_ptr().add(x_off));
+                let xv1 = _mm256_loadu_ps(x.as_ptr().add(x_off + 8));
+                let xv2 = _mm256_loadu_ps(x.as_ptr().add(x_off + 16));
+                let xv3 = _mm256_loadu_ps(x.as_ptr().add(x_off + 24));
+
+                acc0 = _mm256_fmadd_ps(dv0, xv0, acc0);
+                acc1 = _mm256_fmadd_ps(dv1, xv1, acc1);
+                acc2 = _mm256_fmadd_ps(dv2, xv2, acc2);
+                acc3 = _mm256_fmadd_ps(dv3, xv3, acc3);
+            } else {
+                // ▸ Boundary block: scalar tail (only first or last block per row)
+                for i in overlap_start..overlap_end {
+                    scalar_tail += deq[i] * x[x_off + (i - overlap_start)];
+                }
             }
         }
 
-        // Load into AVX register for final bias add
-        *yi = scalar_acc + bias.map_or(0.0, |b| b[row]);
+        // ── Horizontal reduction ──────────────────────────────────────
+        let sum01  = _mm256_add_ps(acc0, acc1);
+        let sum23  = _mm256_add_ps(acc2, acc3);
+        let sumall = _mm256_add_ps(sum01, sum23);
+        let mut total = hsum256(sumall) + scalar_tail;
+        if let Some(b) = bias { total += b[row]; }
+        *yi = total;
     });
 }
 
-/// Scalar Q4_0 matmul (correct for any element count).
+/// Scalar Q4_0 matmul: block-at-a-time dequantize → dot product.
 fn matmul_q4_0_scalar(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
-    let block_bytes = 18;
-    let total_elements = n * m;
-    let total_blocks = total_elements.div_ceil(32);
+    const BLOCK_BYTES: usize = 18;
 
     y.par_iter_mut().enumerate().for_each(|(row, yi)| {
         let row_start = row * m;
-        let first_b = row_start / 32;
-        let last_b = ((row_start + m - 1) / 32).min(total_blocks.saturating_sub(1));
+        let row_end = row_start + m;
+        let first_block = row_start / 32;
+        let last_block = (row_end.saturating_sub(1)) / 32;
         let mut sum = 0.0f32;
 
-        for b in first_b..=last_b {
-            let bo = b * block_bytes;
-            if bo + 18 > w_q.len() { break; }
-            let scale = f16::from_le_bytes([w_q[bo], w_q[bo + 1]]).to_f32();
-            let qs = &w_q[bo + 2..bo + 18];
-            let elem_start = b * 32;
-            let elem_end = ((b + 1) * 32).min(total_elements);
+        for b in first_block..=last_block {
+            let bo = b * BLOCK_BYTES;
+            if bo + BLOCK_BYTES > w_q.len() { break; }
 
-            for e in elem_start..elem_end {
-                let r = e / m;
-                if r != row { continue; }
-                let c = e % m;
-                let li = e - b * 32;
-                let byte = qs[li / 2];
-                let nib = if (li & 1) == 0 { byte & 0x0F } else { byte >> 4 };
-                sum += x[c] * ((nib as i32 - 8) as f32 * scale);
+            let scale = f16::from_le_bytes([w_q[bo], w_q[bo + 1]]).to_f32();
+            let qs = &w_q[bo + 2..bo + BLOCK_BYTES];
+
+            // Dequantize 32 values
+            let mut deq = [0.0f32; 32];
+            for i in 0..16 {
+                let byte = qs[i];
+                deq[i * 2]     = ((byte & 0x0F) as i32 - 8) as f32 * scale;
+                deq[i * 2 + 1] = (((byte >> 4) & 0x0F) as i32 - 8) as f32 * scale;
+            }
+
+            // Determine overlap
+            let block_start = b * 32;
+            let overlap_start = if block_start < row_start { row_start - block_start } else { 0 };
+            let overlap_end   = if block_start + 32 > row_end { row_end - block_start } else { 32 };
+            let x_off = if block_start > row_start { block_start - row_start } else { 0 };
+
+            for i in overlap_start..overlap_end {
+                sum += deq[i] * x[x_off + (i - overlap_start)];
             }
         }
+
         *yi = sum + bias.map_or(0.0, |b| b[row]);
     });
 }
@@ -344,7 +425,7 @@ fn matmul_q4_0_scalar(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
-unsafe fn matmul_f16_avx2_fma(y: &mut [f32], w: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
+unsafe fn matmul_f16_avx2_fma(y: &mut [f32], w: &[u8], x: &[f32], bias: Option<&[f32]>, _n: usize, m: usize) {
     use std::arch::x86_64::*;
     let m8 = m - (m % 8);
     // w is &[u8] but contains f16 pairs
@@ -491,7 +572,7 @@ unsafe fn vsubexp_avx2(v: std::arch::x86_64::__m256) -> std::arch::x86_64::__m25
     let x3 = _mm256_mul_ps(x2, v);
     let x4 = _mm256_mul_ps(x3, v);
     let x5 = _mm256_mul_ps(x4, v);
-    let x6 = _mm256_mul_ps(x5, v);
+    let _x6 = _mm256_mul_ps(x5, v);
 
     let t1 = _mm256_fmadd_ps(c1, v, _mm256_set1_ps(1.0));
     let t2 = _mm256_fmadd_ps(c2, x2, t1);

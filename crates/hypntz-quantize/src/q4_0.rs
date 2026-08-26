@@ -11,6 +11,7 @@
 use half::f16;
 
 /// Architecture-dispatched dot product of f32 vector x against Q4_0 quantized vector y_q.
+#[allow(dead_code)]
 pub fn dot_product_q4_0(x: &[f32], y_q: &[u8], n: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {

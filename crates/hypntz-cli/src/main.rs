@@ -7,7 +7,6 @@
 //! ```
 
 use clap::Parser;
-use hypntz_core::DType;
 use hypntz_inference::{
     ForwardBuffers, HypnoConfig, model_forward,
 };
@@ -134,7 +133,7 @@ fn generate(
 
     let mut logits = Vec::new();
     for (i, &tid) in token_ids.iter().enumerate() {
-        let is_last = i == token_ids.len() - 1;
+        let _is_last = i == token_ids.len() - 1;
         logits = model_forward(model, config, tid, buffers, true);
     }
     let prefill_elapsed = prefill_start.elapsed();
@@ -221,7 +220,7 @@ fn interactive_mode(
 
         // Processing
         let mut logits = Vec::new();
-        for (i, &tid) in token_ids.iter().enumerate() {
+        for (_i, &tid) in token_ids.iter().enumerate() {
             logits = model_forward(model, config, tid, buffers, true);
         }
 

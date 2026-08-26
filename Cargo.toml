@@ -8,6 +8,7 @@ members = [
     "crates/hypntz-quantize",
     "crates/hypntz-tokenizer",
     "crates/hypntz-cli",
+    "crates/hypntz-bench",
 ]
 
 [workspace.package]
