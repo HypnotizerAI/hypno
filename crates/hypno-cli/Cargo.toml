@@ -14,10 +14,10 @@ name = "hypno-cli"
 path = "src/main.rs"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
-hypno-loader = { path = "../hypno-loader" }
-hypno-inference = { path = "../hypno-inference" }
-hypno-tokenizer = { path = "../hypno-tokenizer" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
+hypno-loader = { version = "0.1.0", path = "../hypno-loader" }
+hypno-inference = { version = "0.1.0", path = "../hypno-inference" }
+hypno-tokenizer = { version = "0.1.0", path = "../hypno-tokenizer" }
 clap.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true

@@ -10,7 +10,7 @@ categories.workspace = true
 description = "Q4_0 and Q8_0 quantization with SIMD dequantization for .hypno models"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
 half.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true

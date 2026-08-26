@@ -10,9 +10,9 @@ categories.workspace = true
 description = "SIMD-accelerated transformer inference runtime with AVX-512/AVX2/NEON auto-dispatch"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
-hypno-loader = { path = "../hypno-loader" }
-hypno-quantize = { path = "../hypno-quantize" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
+hypno-loader = { version = "0.1.0", path = "../hypno-loader" }
+hypno-quantize = { version = "0.1.0", path = "../hypno-quantize" }
 half.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true

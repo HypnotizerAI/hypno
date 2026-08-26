@@ -10,7 +10,7 @@ categories.workspace = true
 description = "Zero-copy memory-mapped reader for .hypno model files"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
 memmap2.workspace = true
 thiserror.workspace = true
 bytemuck.workspace = true

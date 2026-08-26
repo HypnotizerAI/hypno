@@ -10,7 +10,7 @@ categories.workspace = true
 description = "BPE tokenizer for .hypno models, compatible with HuggingFace tokenizer.json"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

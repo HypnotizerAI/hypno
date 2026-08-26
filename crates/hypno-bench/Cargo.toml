@@ -14,10 +14,10 @@ name = "hypno-bench"
 path = "src/main.rs"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
-hypno-inference = { path = "../hypno-inference" }
-hypno-quantize = { path = "../hypno-quantize" }
-hypno-loader = { path = "../hypno-loader" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
+hypno-inference = { version = "0.1.0", path = "../hypno-inference" }
+hypno-quantize = { version = "0.1.0", path = "../hypno-quantize" }
+hypno-loader = { version = "0.1.0", path = "../hypno-loader" }
 half.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true

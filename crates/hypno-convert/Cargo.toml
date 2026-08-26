@@ -14,9 +14,9 @@ name = "hypno-convert"
 path = "src/main.rs"
 
 [dependencies]
-hypno-core = { path = "../hypno-core" }
-hypno-quantize = { path = "../hypno-quantize" }
-hypno-loader = { path = "../hypno-loader" }
+hypno-core = { version = "0.1.0", path = "../hypno-core" }
+hypno-quantize = { version = "0.1.0", path = "../hypno-quantize" }
+hypno-loader = { version = "0.1.0", path = "../hypno-loader" }
 safetensors = "0.5"
 half.workspace = true
 bytemuck.workspace = true
