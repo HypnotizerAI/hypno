@@ -2,6 +2,12 @@
 name = "hypno-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core types and binary format for the Hypno LLM inference engine"
 
 [dependencies]
 bytemuck.workspace = true

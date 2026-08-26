@@ -2,6 +2,12 @@
 name = "hypno-tokenizer"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "BPE tokenizer for .hypno models, compatible with HuggingFace tokenizer.json"
 
 [dependencies]
 hypno-core = { path = "../hypno-core" }

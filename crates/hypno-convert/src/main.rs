@@ -16,6 +16,7 @@
 //! ```
 
 mod converter;
+mod gguf;
 mod lora;
 
 use clap::Parser;
@@ -54,6 +55,10 @@ struct Args {
     /// LoRA merge scale override (default: lora_alpha / r from adapter_config.json).
     #[arg(long)]
     lora_scale: Option<f32>,
+
+    /// Convert from GGUF format instead of safetensors.
+    #[arg(long)]
+    gguf: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,6 +72,22 @@ fn main() -> anyhow::Result<()> {
         "Q8_0" => hypno_core::DType::Q8_0,
         other => anyhow::bail!("Unknown quantize type: {}. Use FP32, FP16, Q4_0, or Q8_0", other),
     };
+
+    // ── GGUF mode: convert from GGUF format ──────────────────
+    if args.gguf {
+        println!("Converting GGUF model from: {}", args.model_dir.display());
+        println!("Output: {}", args.out.display());
+        println!("Dtype: {:?}", dtype);
+        gguf::convert_gguf_to_hypno(&args.model_dir, &args.out, dtype)?;
+
+        if args.validate {
+            println!("\nValidating...");
+            converter::validate(&args.out)?;
+            println!("Validation passed!");
+        }
+        println!("\nDone!");
+        return Ok(());
+    }
 
     // ── LoRA-only mode: convert adapter standalone ───────────
     if let Some(ref lora_only) = args.lora_only {

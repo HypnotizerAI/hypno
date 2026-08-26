@@ -2,6 +2,12 @@
 name = "hypno-inference"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "SIMD-accelerated transformer inference runtime with AVX-512/AVX2/NEON auto-dispatch"
 
 [dependencies]
 hypno-core = { path = "../hypno-core" }

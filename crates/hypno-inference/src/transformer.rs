@@ -326,13 +326,19 @@ pub fn transformer_layer_forward(
                 scores[p] = dot * scale;
             }
         } else {
-            // Single position — no cache needed
-            let k_start = kvh * hdim;
-            let mut dot = 0.0f32;
-            for d in 0..hdim {
-                dot += buffers.q[q_start + d] * buffers.k[k_start + d];
+            // Single position — no cache needed.
+            // On the very first token the cache is still empty (seq_len == 0),
+            // so the current query attends only to itself: softmax of a single
+            // element is 1.0 and there is no score slot to write. Guard the
+            // write so we never index an empty `scores` slice.
+            if seq_len > 0 {
+                let k_start = kvh * hdim;
+                let mut dot = 0.0f32;
+                for d in 0..hdim {
+                    dot += buffers.q[q_start + d] * buffers.k[k_start + d];
+                }
+                scores[0] = dot * scale;
             }
-            scores[0] = dot * scale;
         }
 
         ops::softmax_in_place(&mut scores[..seq_len]);
@@ -347,7 +353,9 @@ pub fn transformer_layer_forward(
                 }
             }
         } else {
-            let aw = scores[0];
+            // seq_len == 0 is the first token attending to itself (weight 1.0);
+            // otherwise the single position's softmax weight lives in scores[0].
+            let aw = if seq_len > 0 { scores[0] } else { 1.0 };
             let v_start = kvh * hdim;
             for d in 0..hdim {
                 buffers.attn_output[o_start + d] = aw * buffers.v[v_start + d];

@@ -9,12 +9,18 @@ members = [
     "crates/hypno-tokenizer",
     "crates/hypno-cli",
     "crates/hypno-bench",
+    "crates/hypno-server",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 license-file = "LICENSE-APACHE"
+repository = "https://github.com/HypnotizerAI/hypno"
+authors = ["Hot-Coco <207921092+Hot-Coco@users.noreply.github.com>"]
+keywords = ["llm", "inference", "transformer", "simd", "machine-learning"]
+categories = ["science", "command-line-utilities"]
 
 [workspace.dependencies]
 anyhow = "1"

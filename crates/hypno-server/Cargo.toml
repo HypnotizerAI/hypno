@@ -1,5 +1,5 @@
 [package]
-name = "hypno-cli"
+name = "hypno-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,10 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Interactive CLI chat with .hypno models — top-p/top-k sampling, streaming decode"
+description = "OpenAI-compatible HTTP API server for Hypno inference"
 
 [[bin]]
-name = "hypno-cli"
+name = "hypno-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,7 +18,14 @@ hypno-core = { path = "../hypno-core" }
 hypno-loader = { path = "../hypno-loader" }
 hypno-inference = { path = "../hypno-inference" }
 hypno-tokenizer = { path = "../hypno-tokenizer" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
+parking_lot.workspace = true
 env_logger.workspace = true
+log.workspace = true
 rayon.workspace = true
