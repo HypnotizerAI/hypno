@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use half::f16;
-use crate::kernels::{cpu_features, matmul_f32, matmul_q4_0, matmul_f16};
+use crate::kernels::{cpu_features, matmul_f32, matmul_q4_0, matmul_q4_0_col, matmul_f16};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -60,6 +60,7 @@ fn run_all_benchmarks() -> Vec<BenchResult> {
         results.push(bench_matmul_f32(n, m, label, threads));
         results.push(bench_matmul_f16(n, m, label, threads));
         results.push(bench_matmul_q4(n, m, label, threads));
+        results.push(bench_matmul_q4_col(n, m, label, threads));
     }
     results.push(bench_rms_norm(4096));
     results.push(bench_rms_norm(14336));
@@ -129,6 +130,37 @@ fn bench_matmul_q4(n: usize, m: usize, label: &str, _threads: usize) -> BenchRes
     for _ in 0..runs { matmul_f32(&mut y_f32, &w_f32, &x, None, n, m); }
     let speedup = (t0_f32.elapsed().as_secs_f64() / runs as f64) / elapsed;
     BenchResult { name: format!("MatMul Q4_0  [{}×{}] {}", n, m, label), category: "matmul-q4".into(), gflops, bandwidth_gbps: bandwidth, time_ms: elapsed * 1000.0, elements_processed: (total * runs) as u64, ops_per_element: 2, dtype_label: "Q4_0".into(), matrix_shape: format!("{}×{}", n, m), speedup_vs_scalar: speedup }
+}
+
+fn bench_matmul_q4_col(n: usize, m: usize, label: &str, _threads: usize) -> BenchResult {
+    let total = n * m;
+    // Create weights in row-major [n][m], then transpose to col-major [m][n]
+    let w_row: Vec<f32> = (0..total).map(|i| ((i as f32) * 1.234567).sin()).collect();
+    // Transpose: w_col[col * n + row] = w_row[row * m + col]
+    let mut w_col = vec![0.0f32; total];
+    for row in 0..n {
+        for col in 0..m {
+            w_col[col * n + row] = w_row[row * m + col];
+        }
+    }
+    let x: Vec<f32> = (0..m).map(|i| ((i as f32) * 0.987654).cos()).collect();
+    let mut y = vec![0.0f32; n];
+    let w_q4 = crate::quant::quantize_f32_to_q4_0(&w_col);
+    // Note: col-major matmul shape is (n, m) but weights are stored transposed
+    for _ in 0..3 { matmul_q4_0_col(&mut y, &w_q4, &x, None, n, m); }
+    let runs = 10;
+    let t0 = Instant::now();
+    for _ in 0..runs { matmul_q4_0_col(&mut y, &w_q4, &x, None, n, m); }
+    let elapsed = t0.elapsed().as_secs_f64() / runs as f64;
+    let gflops = 2.0 * (n * m) as f64 / elapsed / 1e9;
+    let bandwidth = w_q4.len() as f64 / elapsed / 1e9;
+    // Speedup vs row-major Q4_0
+    let mut y_q4 = vec![0.0f32; n];
+    let w_q4_row = crate::quant::quantize_f32_to_q4_0(&w_row);
+    let t0_row = Instant::now();
+    for _ in 0..runs { matmul_q4_0(&mut y_q4, &w_q4_row, &x, None, n, m); }
+    let speedup = (t0_row.elapsed().as_secs_f64() / runs as f64) / elapsed;
+    BenchResult { name: format!("MatMul Q4_0c [{}×{}] {}", n, m, label), category: "matmul-q4-col".into(), gflops, bandwidth_gbps: bandwidth, time_ms: elapsed * 1000.0, elements_processed: (total * runs) as u64, ops_per_element: 2, dtype_label: "Q4_0c".into(), matrix_shape: format!("{}×{}", n, m), speedup_vs_scalar: speedup }
 }
 
 fn bench_rms_norm(dim: usize) -> BenchResult {
