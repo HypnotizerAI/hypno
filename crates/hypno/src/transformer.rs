@@ -88,6 +88,7 @@ impl HypnoConfig {
 
 /// Flat, contiguous KV cache — no pointer chasing, no per-head Vec allocations.
 /// Layout: [n_kv_heads][max_positions * head_dim] as a single Vec<f32> or Vec<f16>.
+#[derive(Clone)]
 pub struct FlatKVCache {
     /// Keys: one flat f32 vec per layer, shape: n_kv_heads × (max_pos × head_dim)
     keys: Vec<Vec<f32>>,

@@ -42,6 +42,10 @@ pub struct Args {
     /// Number of threads for inference
     #[arg(long, default_value = "4")]
     pub threads: usize,
+
+    /// Debug: dump first N logits after prefill
+    #[arg(long, default_value = "0")]
+    pub debug_logits: usize,
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -103,6 +107,11 @@ fn generate(
 
     // Batch prefill: process all prompt tokens in a single forward pass
     let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache, model.is_col_major());
+
+    if args.debug_logits > 0 {
+        dump_logits(&logits, tokenizer, args.debug_logits, "after prefill");
+    }
+
     let prefill_elapsed = prefill_start.elapsed();
     let prompt_tps = token_ids.len() as f64 / prefill_elapsed.as_secs_f64().max(0.001);
 
@@ -124,6 +133,9 @@ fn generate(
         print!("{}", tokenizer.decode(&[next_token]));
         io::stdout().flush()?;
         logits = model_forward(model, config, next_token, buffers, true, model.is_col_major());
+        if args.debug_logits > 0 {
+            dump_logits(&logits, tokenizer, args.debug_logits, "after model_forward");
+        }
     }
 
     let gen_elapsed = gen_start.elapsed();
@@ -160,6 +172,10 @@ fn interactive_mode(
         // Batch prefill: process all prompt tokens in a single forward pass
         let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache, model.is_col_major());
 
+        if args.debug_logits > 0 {
+            dump_logits(&logits, tokenizer, args.debug_logits, "after prefill");
+        }
+
         let mut rng = XorShift64::new(args.seed.wrapping_add(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default().as_nanos() as u64
@@ -175,6 +191,9 @@ fn interactive_mode(
             print!("{}", tokenizer.decode(&[next_token]));
             io::stdout().flush()?;
             logits = model_forward(model, config, next_token, buffers, true, model.is_col_major());
+        if args.debug_logits > 0 {
+            dump_logits(&logits, tokenizer, args.debug_logits, "after model_forward");
+        }
         }
         println!("\n  [{} tokens generated]\n", gen_count);
     }
@@ -229,6 +248,20 @@ fn sample_token(logits: &[f32], temperature: f32, top_p: f32, top_k: usize, rng:
     probs.iter().enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i as u32).unwrap_or(0)
+}
+
+/// Debug helper: print top-N logits with token text.
+fn dump_logits(logits: &[f32], tokenizer: &HypnoTokenizer, n: usize, label: &str) {
+    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let n = n.min(indexed.len());
+    eprintln!("\n=== LOGITS {} (top {}) ===", label, n);
+    for i in 0..n {
+        let (tid, val) = indexed[i];
+        let token_text = tokenizer.decode(&[tid as u32]);
+        eprintln!("  #{:2}: id={:5}  val={:12.4}  text='{}'", i + 1, tid, val, token_text);
+    }
+    eprintln!("  ... (vocab size {})", logits.len());
 }
 
 struct XorShift64 { state: u64 }

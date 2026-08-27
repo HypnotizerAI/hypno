@@ -350,6 +350,10 @@ mod tests {
     /// Create a minimal .hypno model for end-to-end testing.
     /// Dimensions: hd=64, nh=4, nkv=2, im=172, n_layers=2, vocab=1000
     fn create_tiny_model() -> (tempfile::TempDir, std::path::PathBuf, HypnoConfig) {
+        create_tiny_model_with_dtype(DType::FP32)
+    }
+
+    fn create_tiny_model_with_dtype(dtype: DType) -> (tempfile::TempDir, std::path::PathBuf, HypnoConfig) {
         use safetensors::tensor::TensorView;
         use safetensors::Dtype as SfDtype;
 
@@ -424,7 +428,7 @@ mod tests {
 
         // Convert to .hypno
         let hypno_path = tmp_dir.path().join("tiny.hypno");
-        crate::sft_convert::convert(model_dir, &hypno_path, DType::FP32, false).unwrap();
+        crate::sft_convert::convert(model_dir, &hypno_path, dtype, false).unwrap();
 
         let model_config = HypnoConfig {
             hidden_size: hd,
@@ -489,6 +493,196 @@ mod tests {
         // (deterministic floating point).
         assert!(max_diff < 1e-5,
             "logits differ: max_diff={:.6e}, avg_diff={:.6e}", max_diff, avg_diff);
+    }
+
+    /// Verify that model_forward generation after batch_forward produces
+    /// identical logits to pure token-by-token forward. This catches bugs
+    /// in the KV cache handoff between batch prefill and generation.
+    #[test]
+    fn test_generation_after_batch_forward() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build_global()
+            .unwrap_or(());
+
+        let (_tmp_dir, hypno_path, config) = create_tiny_model();
+        let model = HypnoModel::open(&hypno_path).unwrap();
+        let prompt_tokens: Vec<u32> = vec![1, 5, 10, 42];
+        let next_token: u32 = 100;
+
+        // ── Path A: batch prefill → model_forward generation ──
+        let mut cache_a = FlatKVCache::new(
+            config.num_hidden_layers,
+            config.num_key_value_heads,
+            config.max_position_embeddings,
+            config.head_dim,
+        );
+        let _prefill_logits = batch_forward(&model, &config, &prompt_tokens, &mut cache_a, false);
+        // Simulate what run.rs does: create ForwardBuffers with the populated cache
+        let mut buffers_a = ForwardBuffers::new(&config);
+        buffers_a.kv_cache = cache_a.clone();
+        let gen_logits_a = transformer::model_forward(&model, &config, next_token, &mut buffers_a, true, false);
+
+        // ── Path B: all sequential model_forward ──
+        let mut buffers_b = ForwardBuffers::new(&config);
+        buffers_b.reset_cache();
+        for &tid in &prompt_tokens {
+            transformer::model_forward(&model, &config, tid, &mut buffers_b, true, false);
+        }
+        let gen_logits_b = transformer::model_forward(&model, &config, next_token, &mut buffers_b, true, false);
+
+        assert_eq!(gen_logits_a.len(), gen_logits_b.len());
+
+        let mut max_diff = 0.0f32;
+        for i in 0..gen_logits_a.len() {
+            let diff = (gen_logits_a[i] - gen_logits_b[i]).abs();
+            if diff > max_diff { max_diff = diff; }
+        }
+        assert!(max_diff < 1e-5,
+            "Generation logits after batch_forward differ from sequential: max_diff={:.6e}", max_diff);
+    }
+
+    /// Same as test_generation_after_batch_forward but with Q4_0 quantized weights.
+    /// Q4_0 introduces quantization error so tolerance is higher.
+    #[test]
+    fn test_generation_after_batch_forward_q4() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build_global()
+            .unwrap_or(());
+
+        let (_tmp_dir, hypno_path, config) = create_tiny_model_with_dtype(DType::Q4_0);
+        let model = HypnoModel::open(&hypno_path).unwrap();
+        let prompt_tokens: Vec<u32> = vec![1, 5, 10, 42];
+        let next_token: u32 = 100;
+
+        // Path A: batch prefill → generation
+        let mut cache_a = FlatKVCache::new(
+            config.num_hidden_layers, config.num_key_value_heads,
+            config.max_position_embeddings, config.head_dim,
+        );
+        let _ = batch_forward(&model, &config, &prompt_tokens, &mut cache_a, false);
+        let mut buffers_a = ForwardBuffers::new(&config);
+        buffers_a.kv_cache = cache_a.clone();
+        let gen_logits_a = transformer::model_forward(&model, &config, next_token, &mut buffers_a, true, false);
+
+        // Path B: all sequential
+        let mut buffers_b = ForwardBuffers::new(&config);
+        buffers_b.reset_cache();
+        for &tid in &prompt_tokens {
+            transformer::model_forward(&model, &config, tid, &mut buffers_b, true, false);
+        }
+        let gen_logits_b = transformer::model_forward(&model, &config, next_token, &mut buffers_b, true, false);
+
+        assert_eq!(gen_logits_a.len(), gen_logits_b.len());
+        let mut max_diff = 0.0f32;
+        for i in 0..gen_logits_a.len() {
+            let diff = (gen_logits_a[i] - gen_logits_b[i]).abs();
+            if diff > max_diff { max_diff = diff; }
+        }
+        // Q4_0 has ~3% average error; 1e-3 is a generous threshold
+        assert!(max_diff < 1e-3,
+            "Q4_0 generation logits differ: max_diff={:.6e}", max_diff);
+    }
+
+    /// Full-scale test: batch prefill at TinyLlama dimensions (2048 hidden, 22 layers, Q4_0).
+    /// Catches bugs that only manifest at production model sizes.
+    #[test]
+    fn test_generation_full_scale_q4() {
+        use std::io::Write;
+        rayon::ThreadPoolBuilder::new().num_threads(2).build_global().unwrap_or(());
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let model_dir = tmp_dir.path();
+
+        // TinyLlama-1.1B dimensions
+        let hd: usize = 2048;
+        let im: usize = 5632;
+        let nh: usize = 32;
+        let nkv: usize = 4;
+        let hdim: usize = hd / nh; // 64
+        let n_layers: usize = 22;
+        let vocab: usize = 32000;
+
+        let config = serde_json::json!({
+            "architectures": ["LlamaForCausalLM"],
+            "hidden_size": hd, "intermediate_size": im,
+            "num_attention_heads": nh, "num_key_value_heads": nkv,
+            "num_hidden_layers": n_layers, "vocab_size": vocab,
+            "max_position_embeddings": 2048, "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0
+        });
+        std::fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+
+        let mut data_buffers: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
+        let mut add_tensor = |name: &str, shape: Vec<usize>| {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|i| ((i + 1) as f32) * 0.001).collect();
+            data_buffers.push((name.to_string(), shape, data));
+        };
+
+        add_tensor("model.embed_tokens.weight", vec![vocab, hd]);
+        add_tensor("lm_head.weight", vec![vocab, hd]);
+        for l in 0..n_layers {
+            let p = format!("model.layers.{}.", l);
+            add_tensor(&format!("{}input_layernorm.weight", p), vec![hd]);
+            add_tensor(&format!("{}post_attention_layernorm.weight", p), vec![hd]);
+            add_tensor(&format!("{}self_attn.q_proj.weight", p), vec![nh * hdim, hd]);
+            add_tensor(&format!("{}self_attn.k_proj.weight", p), vec![nkv * hdim, hd]);
+            add_tensor(&format!("{}self_attn.v_proj.weight", p), vec![nkv * hdim, hd]);
+            add_tensor(&format!("{}self_attn.o_proj.weight", p), vec![hd, hd]);
+            add_tensor(&format!("{}mlp.gate_proj.weight", p), vec![im, hd]);
+            add_tensor(&format!("{}mlp.up_proj.weight", p), vec![im, hd]);
+            add_tensor(&format!("{}mlp.down_proj.weight", p), vec![hd, im]);
+        }
+        add_tensor("model.norm.weight", vec![hd]);
+
+        use safetensors::tensor::TensorView;
+        use safetensors::Dtype as SfDtype;
+        let mut tensors: std::collections::BTreeMap<String, TensorView> = std::collections::BTreeMap::new();
+        for (name, shape, ref data) in &data_buffers {
+            tensors.insert(name.clone(), TensorView::new(SfDtype::F32, shape.clone(), bytemuck::cast_slice(data)).unwrap());
+        }
+        let sf_path = model_dir.join("model.safetensors");
+        std::fs::write(&sf_path, safetensors::serialize(&tensors, &None).unwrap()).unwrap();
+
+        let hypno_path = tmp_dir.path().join("full.hypno");
+        crate::sft_convert::convert(model_dir, &hypno_path, DType::Q4_0, false).unwrap();
+
+        let model = HypnoModel::open(&hypno_path).unwrap();
+        let model_config = HypnoConfig {
+            hidden_size: hd, intermediate_size: im,
+            num_attention_heads: nh, num_key_value_heads: nkv,
+            num_hidden_layers: n_layers, vocab_size: vocab,
+            max_position_embeddings: 2048, rms_norm_eps: 1e-5,
+            rope_theta: 10000.0, head_dim: hdim,
+        };
+
+        let prompt_tokens: Vec<u32> = vec![1, 5, 10, 42, 100, 7, 3];
+        let next_token: u32 = 500;
+
+        // Path A: batch → generation
+        let mut cache_a = FlatKVCache::new(n_layers, nkv, 2048, hdim);
+        let _ = batch_forward(&model, &model_config, &prompt_tokens, &mut cache_a, false);
+        let mut buffers_a = ForwardBuffers::new(&model_config);
+        buffers_a.kv_cache = cache_a.clone();
+        let gen_a = transformer::model_forward(&model, &model_config, next_token, &mut buffers_a, true, false);
+
+        // Path B: all sequential
+        let mut buffers_b = ForwardBuffers::new(&model_config);
+        buffers_b.reset_cache();
+        for &tid in &prompt_tokens {
+            transformer::model_forward(&model, &model_config, tid, &mut buffers_b, true, false);
+        }
+        let gen_b = transformer::model_forward(&model, &model_config, next_token, &mut buffers_b, true, false);
+
+        let mut max_diff = 0.0f32;
+        for i in 0..gen_a.len() {
+            let diff = (gen_a[i] - gen_b[i]).abs();
+            if diff > max_diff { max_diff = diff; }
+        }
+        assert!(max_diff < 1e-3,
+            "Full-scale Q4_0 generation differs: max_diff={:.6e}", max_diff);
     }
 
     /// Test with a single token — batch and token-by-token should be identical
