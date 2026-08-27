@@ -300,42 +300,14 @@ unsafe fn matmul_q4_0_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[
             // ── Dequantize all 32 nibbles into a stack buffer ──────────
             let mut deq = [0.0f32; 32];
             {
-                let qbytes = _mm_loadu_si128(qs_ptr as *const __m128i);
-                let q16 = _mm256_cvtepu8_epi16(qbytes);          // 16 × u16  (byte → u16)
-                let lo = _mm256_and_si256(q16, _mm256_set1_epi16(0x0F));   // low nibbles
-                let hi = _mm256_srli_epi16(q16, 4);                        // high nibbles
-
-                // Convert low 8 u16 → 8 × f32, interleave into deq[0,2,4,…]
-                let lo0_128 = _mm256_castsi256_si128(lo);
-                let lo0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo0_128));
-                // Convert low high 8 u16 → 8 × f32, interleave into deq[16,18,20,…]
-                let lo1_128 = _mm256_extracti128_si256(lo, 1);
-                let lo1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo1_128));
-
-                let hi0_128 = _mm256_castsi256_si128(hi);
-                let hi0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi0_128));
-                let hi1_128 = _mm256_extracti128_si256(hi, 1);
-                let hi1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi1_128));
-
-                // Subtract zero-point (8) and scale
-                let z = _mm256_set1_ps(8.0);
-                let sc = _mm256_set1_ps(scale);
-                let lo0_f = _mm256_mul_ps(_mm256_sub_ps(lo0_i32, z), sc);
-                let lo1_f = _mm256_mul_ps(_mm256_sub_ps(lo1_i32, z), sc);
-                let hi0_f = _mm256_mul_ps(_mm256_sub_ps(hi0_i32, z), sc);
-                let hi1_f = _mm256_mul_ps(_mm256_sub_ps(hi1_i32, z), sc);
-
-                // Interleave lo/hi into deq: deq[2*i]=lo, deq[2*i+1]=hi
-                // Use _mm256_unpacklo_ps / _mm256_unpackhi_ps for interleaving
-                let pair0 = _mm256_unpacklo_ps(lo0_f, hi0_f);   // lo[0],hi[0], lo[1],hi[1], lo[2],hi[2], lo[3],hi[3]
-                let pair1 = _mm256_unpackhi_ps(lo0_f, hi0_f);   // lo[4],hi[4], lo[5],hi[5], lo[6],hi[6], lo[7],hi[7]
-                let pair2 = _mm256_unpacklo_ps(lo1_f, hi1_f);   // lo[8],hi[8], …
-                let pair3 = _mm256_unpackhi_ps(lo1_f, hi1_f);   // lo[12],hi[12], …
-
-                _mm256_storeu_ps(deq.as_mut_ptr(),         pair0);   // deq[0..8]
-                _mm256_storeu_ps(deq.as_mut_ptr().add(8),  pair1);   // deq[8..16]
-                _mm256_storeu_ps(deq.as_mut_ptr().add(16), pair2);   // deq[16..24]
-                _mm256_storeu_ps(deq.as_mut_ptr().add(24), pair3);   // deq[24..32]
+                // Scalar dequantization — correct byte-pair ordering.
+                // Byte i stores: low nibble = element 2i, high nibble = element 2i+1.
+                let qs = std::slice::from_raw_parts(qs_ptr, 16);
+                for i in 0..16 {
+                    let byte = qs[i];
+                    deq[i * 2]     = ((byte & 0x0F) as i32 - 8) as f32 * scale;
+                    deq[i * 2 + 1] = (((byte >> 4) & 0x0F) as i32 - 8) as f32 * scale;
+                }
             }
 
             // ── Determine overlap with this row ───────────────────────
@@ -488,29 +460,22 @@ unsafe fn matmul_q4_0_col_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Optio
                 let qs_ptr = w_q.as_ptr().add(bo + 2);
                 let row_base = b * 32;
 
-                // ── SIMD dequantize: same as row-major kernel ──
-                let qbytes = _mm_loadu_si128(qs_ptr as *const __m128i);
-                let q16 = _mm256_cvtepu8_epi16(qbytes);
-                let lo = _mm256_and_si256(q16, _mm256_set1_epi16(0x0F));
-                let hi = _mm256_srli_epi16(q16, 4);
+                // ── Scalar dequantize: correct byte-pair ordering ──
+                let mut deq = [0.0f32; 32];
+                {
+                    let qs = std::slice::from_raw_parts(qs_ptr, 16);
+                    for i in 0..16 {
+                        let byte = qs[i];
+                        deq[i * 2]     = ((byte & 0x0F) as i32 - 8) as f32 * scale;
+                        deq[i * 2 + 1] = (((byte >> 4) & 0x0F) as i32 - 8) as f32 * scale;
+                    }
+                }
 
-                let lo0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(lo)));
-                let lo1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(lo, 1)));
-                let hi0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(hi)));
-                let hi1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(hi, 1)));
-
-                let z = _mm256_set1_ps(8.0);
-                let sc = _mm256_set1_ps(scale);
-                let lo0_f = _mm256_mul_ps(_mm256_sub_ps(lo0_i32, z), sc);
-                let lo1_f = _mm256_mul_ps(_mm256_sub_ps(lo1_i32, z), sc);
-                let hi0_f = _mm256_mul_ps(_mm256_sub_ps(hi0_i32, z), sc);
-                let hi1_f = _mm256_mul_ps(_mm256_sub_ps(hi1_i32, z), sc);
-
-                // Interleave lo/hi: deq[0,1,2,3,4,5,6,7] = lo[0],hi[0],lo[1],hi[1],...
-                let dv0 = _mm256_unpacklo_ps(lo0_f, hi0_f);
-                let dv1 = _mm256_unpackhi_ps(lo0_f, hi0_f);
-                let dv2 = _mm256_unpacklo_ps(lo1_f, hi1_f);
-                let dv3 = _mm256_unpackhi_ps(lo1_f, hi1_f);
+                // Load dequantized values into 256-bit vectors for FMA
+                let dv0 = _mm256_loadu_ps(deq.as_ptr());
+                let dv1 = _mm256_loadu_ps(deq.as_ptr().add(8));
+                let dv2 = _mm256_loadu_ps(deq.as_ptr().add(16));
+                let dv3 = _mm256_loadu_ps(deq.as_ptr().add(24));
 
                 // ── Accumulate: local_y[row + i] += deq[i] * xc ──
                 let y_ptr = local_y.as_mut_ptr().add(row_base);

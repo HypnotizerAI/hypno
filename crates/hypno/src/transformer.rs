@@ -245,6 +245,24 @@ fn get_weight<'a>(model: &'a HypnoModel, name: &str) -> Option<(&'a [u8], DType)
     model.get_tensor_data(name)
 }
 
+/// Load a 1D weight vector, converting FP16→f32 if needed.
+/// Used for RMSNorm/LayerNorm weights.
+fn load_1d_f32(model: &HypnoModel, name: &str, len: usize) -> Vec<f32> {
+    if let Some((data, dtype)) = get_weight(model, name) {
+        match dtype {
+            DType::FP32 => bytemuck::cast_slice::<u8, f32>(data).to_vec(),
+            DType::FP16 => {
+                use half::f16;
+                let f16_data: &[f16] = bytemuck::cast_slice(data);
+                f16_data.iter().map(|v| v.to_f32()).collect()
+            }
+            _ => vec![1.0f32; len],
+        }
+    } else {
+        vec![1.0f32; len]
+    }
+}
+
 /// Matmul dispatch: column-major or standard, based on model layout.
 #[inline]
 fn matmul_dispatch(
@@ -279,9 +297,7 @@ pub fn transformer_layer_forward(
 
     // 1. RMSNorm — save residual first, then norm in-place
     buffers.residual.copy_from_slice(&buffers.hidden);
-    let norm_weight = get_weight(model, &format!("{}input_layernorm.weight", prefix))
-        .map(|(d, _)| bytemuck::cast_slice::<u8, f32>(d).to_vec())
-        .unwrap_or_else(|| vec![1.0f32; hd]);
+    let norm_weight = load_1d_f32(model, &format!("{}input_layernorm.weight", prefix), hd);
     ops::rms_norm_in_place(&mut buffers.hidden, &norm_weight, config.rms_norm_eps);
 
     // 2. Q, K, V projections
@@ -415,9 +431,7 @@ pub fn transformer_layer_forward(
     // Fused: save residual → norm in one conceptual pass (still two ops, but contiguous)
     buffers.residual.copy_from_slice(&buffers.hidden);
 
-    let post_norm = get_weight(model, &format!("{}post_attention_layernorm.weight", prefix))
-        .map(|(d, _)| bytemuck::cast_slice::<u8, f32>(d).to_vec())
-        .unwrap_or_else(|| vec![1.0f32; hd]);
+    let post_norm = load_1d_f32(model, &format!("{}post_attention_layernorm.weight", prefix), hd);
     ops::rms_norm_in_place(&mut buffers.hidden, &post_norm, config.rms_norm_eps);
 
     // Gate + Up projections
@@ -473,7 +487,12 @@ pub fn model_forward(
                 let start = token_id as usize * hd;
                 f16_data[start..start + hd].iter().map(|v| v.to_f32()).collect()
             }
-            _ => vec![0.0f32; hd],
+            DType::Q4_0 => {
+                crate::quant::q4_0_extract_row(emb_data, token_id as usize, hd)
+            }
+            DType::Q8_0 => {
+                crate::quant::q8_0_extract_row(emb_data, token_id as usize, hd)
+            }
         };
         buffers.hidden.copy_from_slice(&emb);
     } else {
@@ -491,9 +510,7 @@ pub fn model_forward(
     }
 
     // 3. Final RMSNorm
-    let final_norm = get_weight(model, "model.norm.weight")
-        .map(|(d, _)| bytemuck::cast_slice::<u8, f32>(d).to_vec())
-        .unwrap_or_else(|| vec![1.0f32; hd]);
+    let final_norm = load_1d_f32(model, "model.norm.weight", hd);
     ops::rms_norm_in_place(&mut buffers.hidden, &final_norm, config.rms_norm_eps);
 
     // 4. LM head → logits
