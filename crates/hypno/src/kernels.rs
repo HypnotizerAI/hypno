@@ -455,49 +455,49 @@ pub fn matmul_q4_0_col(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matmul_q4_0_col_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
     use std::arch::x86_64::*;
+    use rayon::prelude::*;
     const BLOCK_BYTES: usize = 18;
 
-    let blocks_per_col = n / 32;          // n is multiple of 32 for LLaMA dims
-    let full_blocks = blocks_per_col * 32; // n rounded down to 32 boundary
+    let blocks_per_col = n / 32;
+    debug_assert!(blocks_per_col * 32 == n, "column count not multiple of 32");
     let bytes_per_col = blocks_per_col * BLOCK_BYTES;
 
-    // Process 8 input dimensions at a time for SIMD efficiency
-    let m8 = m - (m % 8);
+    let num_threads = rayon::current_num_threads().max(1);
+    let chunk_size = (m + num_threads - 1) / num_threads;
 
-    // Zero output
-    y.fill(0.0);
+    // Thread-local accumulation buffers
+    let mut locals: Vec<Vec<f32>> = (0..num_threads).map(|_| vec![0.0f32; n]).collect();
 
-    for k in (0..m8).step_by(8) {
-        // Process each block of 32 output rows
-        for b in 0..blocks_per_col {
-            let row_base = b * 32;
+    // Column-parallel: each thread processes a range of columns. A column's
+    // n values are contiguous in column-major layout, so dequantization is
+    // sequential and cache-friendly. The same SIMD block dequantization as
+    // row-major applies here — a Q4_0 block is 32 consecutive elements.
+    locals.par_iter_mut().enumerate().for_each(|(t, local_y)| {
+        let col_start = t * chunk_size;
+        let col_end = (col_start + chunk_size).min(m);
 
-            // Dequantize 8 consecutive blocks (columns k..k+7, same row range)
-            // Each block produces 32 dequantized values
-            let mut deq: [[__m256; 4]; 8] = [[_mm256_setzero_ps(); 4]; 8];
+        for col in col_start..col_end {
+            let xc = _mm256_set1_ps(x[col]);  // broadcast scalar to 8 lanes
+            let col_off = col * bytes_per_col;
 
-            for col in 0..8 {
-                let bo = (k + col) * bytes_per_col + b * BLOCK_BYTES;
+            for b in 0..blocks_per_col {
+                let bo = col_off + b * BLOCK_BYTES;
                 if bo + BLOCK_BYTES > w_q.len() { break; }
 
                 let scale = f16::from_le_bytes([w_q[bo], w_q[bo + 1]]).to_f32();
                 let qs_ptr = w_q.as_ptr().add(bo + 2);
+                let row_base = b * 32;
 
-                // Dequantize 32 nibbles → f32, same as row-major kernel
+                // ── SIMD dequantize: same as row-major kernel ──
                 let qbytes = _mm_loadu_si128(qs_ptr as *const __m128i);
                 let q16 = _mm256_cvtepu8_epi16(qbytes);
                 let lo = _mm256_and_si256(q16, _mm256_set1_epi16(0x0F));
                 let hi = _mm256_srli_epi16(q16, 4);
 
-                let lo0_128 = _mm256_castsi256_si128(lo);
-                let lo0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo0_128));
-                let lo1_128 = _mm256_extracti128_si256(lo, 1);
-                let lo1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(lo1_128));
-
-                let hi0_128 = _mm256_castsi256_si128(hi);
-                let hi0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi0_128));
-                let hi1_128 = _mm256_extracti128_si256(hi, 1);
-                let hi1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(hi1_128));
+                let lo0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(lo)));
+                let lo1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(lo, 1)));
+                let hi0_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(hi)));
+                let hi1_i32 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(hi, 1)));
 
                 let z = _mm256_set1_ps(8.0);
                 let sc = _mm256_set1_ps(scale);
@@ -506,58 +506,35 @@ unsafe fn matmul_q4_0_col_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Optio
                 let hi0_f = _mm256_mul_ps(_mm256_sub_ps(hi0_i32, z), sc);
                 let hi1_f = _mm256_mul_ps(_mm256_sub_ps(hi1_i32, z), sc);
 
-                // Interleave into deq[col][0..3]
-                deq[col][0] = _mm256_unpacklo_ps(lo0_f, hi0_f);
-                deq[col][1] = _mm256_unpackhi_ps(lo0_f, hi0_f);
-                deq[col][2] = _mm256_unpacklo_ps(lo1_f, hi1_f);
-                deq[col][3] = _mm256_unpackhi_ps(lo1_f, hi1_f);
-            }
+                // Interleave lo/hi: deq[0,1,2,3,4,5,6,7] = lo[0],hi[0],lo[1],hi[1],...
+                let dv0 = _mm256_unpacklo_ps(lo0_f, hi0_f);
+                let dv1 = _mm256_unpackhi_ps(lo0_f, hi0_f);
+                let dv2 = _mm256_unpacklo_ps(lo1_f, hi1_f);
+                let dv3 = _mm256_unpackhi_ps(lo1_f, hi1_f);
 
-            // Accumulate: y[row + i] += x[k + col] * deq[col][i/8][i%8]
-            // Process 32 output rows (8 at a time via __m256)
-            for q in 0..4 {
-                let row = row_base + q * 8;
-                if row + 8 > n { break; }
+                // ── Accumulate: local_y[row + i] += deq[i] * xc ──
+                let y_ptr = local_y.as_mut_ptr().add(row_base);
+                let yv0 = _mm256_loadu_ps(y_ptr);
+                let yv1 = _mm256_loadu_ps(y_ptr.add(8));
+                let yv2 = _mm256_loadu_ps(y_ptr.add(16));
+                let yv3 = _mm256_loadu_ps(y_ptr.add(24));
 
-                // Broadcast xv lane 0 to multiply deq[0][q], lane 1 for deq[1][q], etc.
-                // Instead of broadcasting, we multiply each deq by the corresponding x lane
-                // and accumulate.
-                for col in 0..8 {
-                    let x_lane = _mm256_set1_ps(x.as_ptr().add(k + col).read());
-                    let y_ptr = y.as_mut_ptr().add(row);
-                    let yv = _mm256_loadu_ps(y_ptr);
-                    let prod = _mm256_mul_ps(deq[col][q], x_lane);
-                    _mm256_storeu_ps(y_ptr, _mm256_add_ps(yv, prod));
-                }
+                _mm256_storeu_ps(y_ptr,          _mm256_fmadd_ps(dv0, xc, yv0));
+                _mm256_storeu_ps(y_ptr.add(8),   _mm256_fmadd_ps(dv1, xc, yv1));
+                _mm256_storeu_ps(y_ptr.add(16),  _mm256_fmadd_ps(dv2, xc, yv2));
+                _mm256_storeu_ps(y_ptr.add(24),  _mm256_fmadd_ps(dv3, xc, yv3));
             }
         }
-    }
+    });
 
-    // Scalar tail: remaining columns (m % 8)
-    for k in m8..m {
-        let xk = x[k];
-        for b in 0..blocks_per_col {
-            let bo = k * bytes_per_col + b * BLOCK_BYTES;
-            if bo + BLOCK_BYTES > w_q.len() { break; }
-            let scale = f16::from_le_bytes([w_q[bo], w_q[bo + 1]]).to_f32();
-            let qs = &w_q[bo + 2..bo + BLOCK_BYTES];
-            let row_base = b * 32;
-            for i in 0..16 {
-                let byte = qs[i];
-                let v0 = ((byte & 0x0F) as i32 - 8) as f32 * scale;
-                let v1 = (((byte >> 4) & 0x0F) as i32 - 8) as f32 * scale;
-                if row_base + i * 2 < n { y[row_base + i * 2] += v0 * xk; }
-                if row_base + i * 2 + 1 < n { y[row_base + i * 2 + 1] += v1 * xk; }
-            }
+    // Merge thread-local buffers into final output
+    y.par_iter_mut().enumerate().for_each(|(r, yi)| {
+        let mut sum = 0.0f32;
+        for t in 0..num_threads {
+            sum += locals[t][r];
         }
-        // n should always be a multiple of 32 for LLaMA dims
-        debug_assert!(full_blocks == n, "column count not multiple of 32");
-    }
-
-    // Apply bias
-    if let Some(b) = bias {
-        for i in 0..n { y[i] += b[i]; }
-    }
+        *yi = sum + bias.map_or(0.0, |b| b[r]);
+    });
 }
 
 /// Scalar column-major Q4_0 matmul fallback.
