@@ -564,6 +564,7 @@ unsafe fn matmul_q4_0_col_avx2(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Optio
 fn matmul_q4_0_col_scalar(y: &mut [f32], w_q: &[u8], x: &[f32], bias: Option<&[f32]>, n: usize, m: usize) {
     const BLOCK_BYTES: usize = 18;
     let blocks_per_col = n / 32;
+    debug_assert!(blocks_per_col * 32 == n, "column count not multiple of 32");
     let bytes_per_col = blocks_per_col * BLOCK_BYTES;
 
     y.fill(0.0);
