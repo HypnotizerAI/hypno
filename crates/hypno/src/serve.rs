@@ -9,8 +9,9 @@ use axum::{
 };
 use clap::Parser;
 use crate::transformer::{ForwardBuffers, HypnoConfig};
-use crate::transformer::model_forward;
 use crate::loader::HypnoModel;
+use crate::turbo;
+use crate::transformer::model_forward;
 use crate::tokenizer::HypnoTokenizer;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -225,8 +226,13 @@ fn prefill(state: &AppState, prompt: &str, buffers: &mut ForwardBuffers) -> (Vec
     let token_ids = state.tokenizer.encode(prompt);
     let prompt_tokens = token_ids.len();
     buffers.reset_cache();
-    let mut logits = Vec::new();
-    for &tid in &token_ids { logits = model_forward(state.model.as_ref(), state.config.as_ref(), tid, buffers, true, state.model.is_col_major()); }
+    let logits = turbo::batch_forward(
+        state.model.as_ref(),
+        state.config.as_ref(),
+        &token_ids,
+        &mut buffers.kv_cache,
+        state.model.is_col_major(),
+    );
     (logits, prompt_tokens)
 }
 
