@@ -53,7 +53,14 @@ pub fn batch_forward(
                         hidden[offset + i] = f16_data[start + i].to_f32();
                     }
                 }
-                _ => {}
+                DType::Q4_0 => {
+                    let row = crate::quant::q4_0_extract_row(emb_data, tid as usize, hd);
+                    hidden[offset..offset + hd].copy_from_slice(&row);
+                }
+                DType::Q8_0 => {
+                    let row = crate::quant::q8_0_extract_row(emb_data, tid as usize, hd);
+                    hidden[offset..offset + hd].copy_from_slice(&row);
+                }
             }
         }
     }
@@ -78,17 +85,12 @@ pub fn batch_forward(
 
         // ── RMSNorm (batched) ──
         // Use SIMD norm per-row for exact numerical match with token-by-token path.
-        let attn_norm = get_weight(model, &format!("{}input_layernorm.weight", prefix));
+        let nw_f32 = load_norm_f32(model, &format!("{}input_layernorm.weight", prefix), hd);
         {
-            let nw_f32: &[f32] = attn_norm
-                .map(|(d, _)| bytemuck::cast_slice(d))
-                .unwrap_or(&[]);
             for t in 0..batch {
                 let off = t * hd;
                 normed[off..off + hd].copy_from_slice(&hidden[off..off + hd]);
-                if !nw_f32.is_empty() {
-                    ops::rms_norm_in_place(&mut normed[off..off + hd], nw_f32, config.rms_norm_eps);
-                }
+                ops::rms_norm_in_place(&mut normed[off..off + hd], &nw_f32, config.rms_norm_eps);
             }
         }
 
@@ -208,17 +210,12 @@ pub fn batch_forward(
         }
 
         // ── FFN: post_attention_layernorm → gate/up → silu → down → residual
-        let post_norm = get_weight(model, &format!("{}post_attention_layernorm.weight", prefix));
+        let pnw_f32 = load_norm_f32(model, &format!("{}post_attention_layernorm.weight", prefix), hd);
         {
-            let pnw_f32: &[f32] = post_norm
-                .map(|(d, _)| bytemuck::cast_slice(d))
-                .unwrap_or(&[]);
             for t in 0..batch {
                 let off = t * hd;
                 normed[off..off + hd].copy_from_slice(&hidden[off..off + hd]);
-                if !pnw_f32.is_empty() {
-                    ops::rms_norm_in_place(&mut normed[off..off + hd], pnw_f32, config.rms_norm_eps);
-                }
+                ops::rms_norm_in_place(&mut normed[off..off + hd], &pnw_f32, config.rms_norm_eps);
             }
         }
 
@@ -255,13 +252,17 @@ pub fn batch_forward(
     // Advance KV cache position past all prefill tokens
     kv_cache.set_pos(cache_pos + batch);
 
+    // Guard against empty prompts (no tokens to process)
+    if batch == 0 {
+        return vec![0.0f32; config.vocab_size];
+    }
+
     // Final RMSNorm on the last token's hidden state
-    let final_norm = get_weight(model, "model.norm.weight");
     let last_offset = (batch - 1) * hd;
-    if let Some((fnw, _)) = final_norm {
-        let fnw_f32: &[f32] = bytemuck::cast_slice(fnw);
+    let fnw_f32 = load_norm_f32(model, "model.norm.weight", hd);
+    {
         let mut last_hidden = hidden[last_offset..last_offset + hd].to_vec();
-        ops::rms_norm_in_place(&mut last_hidden, fnw_f32, config.rms_norm_eps);
+        ops::rms_norm_in_place(&mut last_hidden, &fnw_f32, config.rms_norm_eps);
         hidden[last_offset..last_offset + hd].copy_from_slice(&last_hidden);
     }
 
@@ -319,7 +320,7 @@ fn batch_matmul(
                 crate::kernels::matmul_f16(y_chunk, w, x_chunk, None, n, dim);
             });
         }
-        DType::Q4_0 | DType::Q8_0 => {
+        DType::Q4_0 => {
             if col_major {
                 y.par_chunks_mut(n).zip(x.par_chunks(dim)).for_each(|(y_chunk, x_chunk)| {
                     crate::kernels::matmul_q4_0_col(y_chunk, w, x_chunk, None, n, dim);
@@ -329,6 +330,14 @@ fn batch_matmul(
                     crate::kernels::matmul_q4_0(y_chunk, w, x_chunk, None, n, dim);
                 });
             }
+        }
+        DType::Q8_0 => {
+            // Q8_0 dequantize → FP32 matmul (same strategy as ops::matmul_vec_auto)
+            let w_f32: Vec<f32> = crate::quant::dequantize_q8_0(w);
+            let w_f32_slice: &[f32] = &w_f32;
+            y.par_chunks_mut(n).zip(x.par_chunks(dim)).for_each(|(y_chunk, x_chunk)| {
+                crate::kernels::matmul_f32(y_chunk, w_f32_slice, x_chunk, None, n, dim);
+            });
         }
     }
 }
@@ -340,6 +349,22 @@ fn silu(x: f32) -> f32 {
 
 fn get_weight<'a>(model: &'a HypnoModel, name: &str) -> Option<(&'a [u8], DType)> {
     model.get_tensor_data(name)
+}
+
+/// Load a 1D weight vector, converting FP16→f32 if needed.
+fn load_norm_f32(model: &HypnoModel, name: &str, len: usize) -> Vec<f32> {
+    if let Some((data, dtype)) = get_weight(model, name) {
+        match dtype {
+            DType::FP32 => bytemuck::cast_slice::<u8, f32>(data).to_vec(),
+            DType::FP16 => {
+                let f16_data: &[f16] = bytemuck::cast_slice(data);
+                f16_data.iter().map(|v| v.to_f32()).collect()
+            }
+            _ => vec![1.0f32; len],
+        }
+    } else {
+        vec![1.0f32; len]
+    }
 }
 
 #[cfg(test)]

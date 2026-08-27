@@ -131,6 +131,48 @@ pub fn dequantize_q4_0(q4_data: &[u8]) -> Vec<f32> {
     out
 }
 
+/// Extract a single row from a Q4_0-quantized 2D matrix.
+///
+/// The matrix has shape `[n_rows, row_width]` stored in row-major order.
+/// Each Q4_0 block covers 32 consecutive elements. `row_width` must be
+/// a multiple of 32.
+pub fn q4_0_extract_row(q4_data: &[u8], row_idx: usize, row_width: usize) -> Vec<f32> {
+    let blocks_per_row = row_width / 32;
+    let row_start_block = row_idx * blocks_per_row;
+    let mut out = vec![0.0f32; row_width];
+    let mut tmp = [0.0f32; 32];
+    for i in 0..blocks_per_row {
+        let block_offset = (row_start_block + i) * Q4_0Block::BLOCK_BYTES;
+        let block: &Q4_0Block = bytemuck::from_bytes(
+            &q4_data[block_offset..block_offset + Q4_0Block::BLOCK_BYTES]
+        );
+        block.dequantize(&mut tmp);
+        out[i * 32..(i + 1) * 32].copy_from_slice(&tmp);
+    }
+    out
+}
+
+/// Extract a single row from a Q8_0-quantized 2D matrix.
+///
+/// Each Q8_0 block covers 32 consecutive elements. `row_width` must be
+/// a multiple of 32. Q8_0 blocks are 34 bytes each (2-byte f16 scale + 32 bytes u8 data).
+pub fn q8_0_extract_row(q8_data: &[u8], row_idx: usize, row_width: usize) -> Vec<f32> {
+    let blocks_per_row = row_width / 32;
+    let row_start_block = row_idx * blocks_per_row;
+    let block_bytes = Q8_0Block::BLOCK_BYTES;
+    let mut out = vec![0.0f32; row_width];
+    for i in 0..blocks_per_row {
+        let bo = (row_start_block + i) * block_bytes;
+        let scale = half::f16::from_le_bytes([q8_data[bo], q8_data[bo + 1]]).to_f32();
+        let qs = &q8_data[bo + 2..bo + 34];
+        for j in 0..32 {
+            // Q8_0: value = (qs[j] - 128) * scale
+            out[i * 32 + j] = (qs[j] as i32 - 128) as f32 * scale;
+        }
+    }
+    out
+}
+
 /// Quantize a slice of f32 values into Q8_0 blocks. len must be divisible by 32.
 pub fn quantize_f32_to_q8_0(data: &[f32]) -> Vec<u8> {
     let n_blocks = data.len() / 32;

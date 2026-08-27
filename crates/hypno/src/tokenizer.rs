@@ -7,6 +7,7 @@
 //! Uses a trie-based approach for efficient byte-pair encoding.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// A single entry in the tokenizer vocabulary.
 #[derive(Debug, Clone)]
@@ -30,6 +31,43 @@ pub struct HypnoTokenizer {
     pad_token_id: Option<u32>,
     unk_token_id: Option<u32>,
 }
+
+/// GPT-2 byte-to-unicode mapping, used by HuggingFace ByteLevel BPE.
+///
+/// Bytes that correspond to printable/latin-1 characters map to themselves.
+/// Remaining bytes (0-32, 127-160, 173) are shifted by 256 into the
+/// U+0100+ range. This matches the `bytes_to_unicode()` function from
+/// the HuggingFace `tokenizers` library.
+static BYTE_TO_CHAR: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut bs: Vec<u32> = (b'!'..=b'~').map(u32::from).collect(); // 33..126
+    bs.extend((0xA1u32..=0xACu32).chain(0xAEu32..=0xFFu32));      // 161..172, 174..255
+    let mut cs: Vec<u32> = bs.clone();
+    let mut n = 0u32;
+    for b in 0u32..256 {
+        if !bs.contains(&b) {
+            bs.push(b);
+            cs.push(256 + n);
+            n += 1;
+        }
+    }
+    // Build mapping: byte → unicode character string
+    let mut result: Vec<String> = vec![String::new(); 256];
+    for (&b, &c) in bs.iter().zip(cs.iter()) {
+        result[b as usize] = char::from_u32(c).unwrap().to_string();
+    }
+    result
+});
+
+/// Reverse mapping: unicode character → byte value.
+static CHAR_TO_BYTE: LazyLock<HashMap<char, u8>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    for (b, s) in BYTE_TO_CHAR.iter().enumerate() {
+        if let Some(ch) = s.chars().next() {
+            map.insert(ch, b as u8);
+        }
+    }
+    map
+});
 
 impl HypnoTokenizer {
     /// Create a tokenizer from a HuggingFace `tokenizer.json` file.
@@ -180,6 +218,7 @@ impl HypnoTokenizer {
     }
 
     /// Word-level tokenization (used when no BPE merges are available).
+    /// Supports SentencePiece-style vocabularies with "▁" (U+2581) space markers.
     fn encode_word_level(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
 
@@ -188,30 +227,80 @@ impl HypnoTokenizer {
             ids.push(bos);
         }
 
-        // Split on whitespace and punctuation
-        let words = tokenize_words(text);
-        for word in words {
-            // Try the full word first
-            if let Some(&id) = self.vocab.get(&word) {
-                ids.push(id);
-            } else {
-                // Try byte-level fallback
-                let bytes = word.as_bytes();
-                for &b in bytes {
-                    let token = format!("<0x{:02X}>", b);
-                    if let Some(&id) = self.vocab.get(&token) {
-                        ids.push(id);
-                    } else if let Some(unk) = self.unk_token_id {
-                        ids.push(unk);
-                    }
-                }
+        // Pre-tokenize: split on whitespace, preserving boundaries
+        let segments = pre_tokenize_sp(text);
+        for (is_first, segment) in segments {
+            if segment.is_empty() {
+                continue;
             }
+            // SentencePiece prepends "▁" to non-first segments (or all segments
+            // depending on add_prefix_space). Try with and without the prefix.
+            let prefixed = if is_first {
+                segment.clone()
+            } else {
+                format!("\u{2581}{}", segment)
+            };
+
+            // Try to encode the segment using longest-prefix matching against vocab
+            self.encode_segment(&mut ids, &prefixed);
         }
 
         ids
     }
 
-    /// Full BPE encoding.
+    /// Encode a single pre-tokenized segment using greedy longest-prefix matching.
+    fn encode_segment(&self, ids: &mut Vec<u32>, segment: &str) {
+        if segment.is_empty() {
+            return;
+        }
+
+        // Try exact match first
+        if let Some(&id) = self.vocab.get(segment) {
+            ids.push(id);
+            return;
+        }
+
+        // Greedy longest-prefix match: scan backward from the end
+        let chars: Vec<char> = segment.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            let mut best_len = 0;
+            let mut best_id = 0u32;
+            // Try substrings starting at pos, from longest to shortest
+            for end in (pos + 1..=chars.len()).rev() {
+                let sub: String = chars[pos..end].iter().collect();
+                if let Some(&id) = self.vocab.get(&sub) {
+                    best_len = end - pos;
+                    best_id = id;
+                    break;
+                }
+            }
+            if best_len > 0 {
+                ids.push(best_id);
+                pos += best_len;
+            } else {
+                // No match found: try byte-level fallback then UNK
+                let ch = chars[pos];
+                let mut found = false;
+                // Some SentencePiece vocabs have byte tokens like "<0xNN>"
+                for &b in ch.to_string().as_bytes() {
+                    let bt = format!("<0x{:02X}>", b);
+                    if let Some(&id) = self.vocab.get(&bt) {
+                        ids.push(id);
+                        found = true;
+                    }
+                }
+                if !found {
+                    if let Some(unk) = self.unk_token_id {
+                        ids.push(unk);
+                    }
+                }
+                pos += 1;
+            }
+        }
+    }
+
+    /// Full BPE encoding using HuggingFace ByteLevel BPE.
     fn encode_bpe(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
 
@@ -219,9 +308,10 @@ impl HypnoTokenizer {
             ids.push(bos);
         }
 
-        // Split text into byte-level characters
+        // Split text into byte-level characters using GPT-2 bytes_to_unicode() mapping
+        let byte_map = &*BYTE_TO_CHAR;
         let mut symbols: Vec<String> = text.as_bytes().iter().map(|&b| {
-            format!("<0x{:02X}>", b)
+            byte_map[b as usize].clone()
         }).collect();
 
         if symbols.is_empty() {
@@ -273,22 +363,26 @@ impl HypnoTokenizer {
         ids
     }
 
-    /// Decode token IDs to text.
+    /// Decode token IDs to text using the reverse ByteLevel mapping.
     pub fn decode(&self, ids: &[u32]) -> String {
+        let char_to_byte = &*CHAR_TO_BYTE;
         let mut result = String::new();
         for &id in ids {
             if (id as usize) < self.id_to_token.len() {
                 let token = &self.id_to_token[id as usize];
-                // Handle byte-level tokens
-                if token.starts_with("<0x") && token.ends_with('>') {
-                    if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
+                // Skip special tokens
+                if token == "<s>" || token == "<bos>" || token == "</s>" || token == "<eos>" || token == "<unk>" || token == "<pad>" {
+                    continue;
+                }
+                // Reverse the ByteLevel mapping for each character in the token
+                for ch in token.chars() {
+                    if let Some(&byte) = char_to_byte.get(&ch) {
                         result.push(byte as char);
+                    } else {
+                        // Fallback: pass through characters not in the byte mapping
+                        // (should not happen for properly formed ByteLevel tokens)
+                        result.push(ch);
                     }
-                } else if token == "<s>" || token == "<bos>" || token == "</s>" || token == "<eos>" || token == "<unk>" || token == "<pad>" {
-                    // Skip special tokens in output
-                } else {
-                    // Replace the HuggingFace Ġ character (space marker) with actual space
-                    result.push_str(&token.replace('\u{0120}', " "));
                 }
             }
         }
@@ -301,39 +395,32 @@ impl HypnoTokenizer {
     pub fn vocab_size(&self) -> usize { self.id_to_token.len() }
 }
 
-/// Simple word tokenizer splitting on whitespace and punctuation boundaries.
-fn tokenize_words(text: &str) -> Vec<String> {
-    let mut words = Vec::new();
+/// Pre-tokenize text into segments, splitting on whitespace.
+/// Returns (is_first, segment) pairs. SentencePiece prepends "▁" (U+2581)
+/// to all but the first segment to mark word boundaries.
+fn pre_tokenize_sp(text: &str) -> Vec<(bool, String)> {
+    let mut segments = Vec::new();
     let mut current = String::new();
-    let mut chars = text.chars().peekable();
+    let mut is_first = true;
 
-    while let Some(ch) = chars.next() {
+    for ch in text.chars() {
         if ch.is_whitespace() {
             if !current.is_empty() {
-                words.push(current.clone());
+                segments.push((is_first, current.clone()));
+                is_first = false;
                 current.clear();
             }
-            // Add space as its own token
-            if let Some(&_id) = None::<&u32> {
-                // Skip — spaces are handled differently
-            }
-        } else if ch.is_ascii_punctuation() {
-            if !current.is_empty() {
-                words.push(current.clone());
-                current.clear();
-            }
-            current.push(ch);
-            words.push(current.clone());
-            current.clear();
+            // Consecutive whitespace: if the model has a space token, add it;
+            // otherwise skip.
         } else {
             current.push(ch);
         }
     }
-    if !current.is_empty() {
-        words.push(current);
+    if !current.is_empty() || segments.is_empty() {
+        segments.push((is_first, current));
     }
 
-    words
+    segments
 }
 
 #[cfg(test)]
