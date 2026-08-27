@@ -244,6 +244,19 @@ fn get_weight<'a>(model: &'a HypnoModel, name: &str) -> Option<(&'a [u8], DType)
     model.get_tensor_data(name)
 }
 
+/// Matmul dispatch: column-major or standard, based on model layout.
+#[inline]
+fn matmul_dispatch(
+    y: &mut [f32], w: &[u8], dtype: DType, x: &[f32],
+    bias: Option<&[f32]>, n: usize, m: usize, col_major: bool,
+) {
+    if col_major {
+        ops::matmul_vec_col(y, w, dtype, x, bias, n, m);
+    } else {
+        ops::matmul_vec_auto(y, w, dtype, x, bias, n, m);
+    }
+}
+
 /// Forward pass through a single transformer layer.
 /// Uses flat KV cache, fused residual+RMSNorm where possible.
 pub fn transformer_layer_forward(
@@ -252,6 +265,7 @@ pub fn transformer_layer_forward(
     layer_idx: usize,
     buffers: &mut ForwardBuffers,
     use_kv_cache: bool,
+    col_major: bool,
 ) {
     let prefix = format!("model.layers.{}.", layer_idx);
     let hd = config.hidden_size;
@@ -271,13 +285,13 @@ pub fn transformer_layer_forward(
 
     // 2. Q, K, V projections
     if let Some((qw, qdt)) = get_weight(model, &format!("{}self_attn.q_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.q, qw, qdt, &buffers.hidden, None, nh * hdim, hd);
+        matmul_dispatch(&mut buffers.q, qw, qdt, &buffers.hidden, None, nh * hdim, hd, col_major);
     }
     if let Some((kw, kdt)) = get_weight(model, &format!("{}self_attn.k_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.k, kw, kdt, &buffers.hidden, None, nkv * hdim, hd);
+        matmul_dispatch(&mut buffers.k, kw, kdt, &buffers.hidden, None, nkv * hdim, hd, col_major);
     }
     if let Some((vw, vdt)) = get_weight(model, &format!("{}self_attn.v_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.v, vw, vdt, &buffers.hidden, None, nkv * hdim, hd);
+        matmul_dispatch(&mut buffers.v, vw, vdt, &buffers.hidden, None, nkv * hdim, hd, col_major);
     }
 
     // 3. RoPE
@@ -385,7 +399,7 @@ pub fn transformer_layer_forward(
     if let Some((ow, odt)) = get_weight(model, &format!("{}self_attn.o_proj.weight", prefix)) {
         let mut tmp = vec![0.0f32; hd];
         tmp.copy_from_slice(&buffers.attn_output);
-        ops::matmul_vec_auto(&mut buffers.hidden, ow, odt, &tmp, None, hd, hd);
+        matmul_dispatch(&mut buffers.hidden, ow, odt, &tmp, None, hd, hd, col_major);
     } else {
         buffers.hidden.copy_from_slice(&buffers.attn_output);
     }
@@ -407,10 +421,10 @@ pub fn transformer_layer_forward(
 
     // Gate + Up projections
     if let Some((gw, gdt)) = get_weight(model, &format!("{}mlp.gate_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.ffn_gate, gw, gdt, &buffers.hidden, None, im, hd);
+        matmul_dispatch(&mut buffers.ffn_gate, gw, gdt, &buffers.hidden, None, im, hd, col_major);
     }
     if let Some((uw, udt)) = get_weight(model, &format!("{}mlp.up_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.ffn_up, uw, udt, &buffers.hidden, None, im, hd);
+        matmul_dispatch(&mut buffers.ffn_up, uw, udt, &buffers.hidden, None, im, hd, col_major);
     }
 
     // SiLU + gate*up fused
@@ -421,7 +435,7 @@ pub fn transformer_layer_forward(
 
     // Down projection
     if let Some((dw, ddt)) = get_weight(model, &format!("{}mlp.down_proj.weight", prefix)) {
-        ops::matmul_vec_auto(&mut buffers.ffn_down, dw, ddt, &buffers.ffn_gate, None, hd, im);
+        matmul_dispatch(&mut buffers.ffn_down, dw, ddt, &buffers.ffn_gate, None, hd, im, col_major);
     } else {
         buffers.ffn_down.copy_from_slice(&buffers.ffn_gate[..hd]);
     }
@@ -439,6 +453,7 @@ pub fn model_forward(
     token_id: u32,
     buffers: &mut ForwardBuffers,
     use_kv_cache: bool,
+    col_major: bool,
 ) -> Vec<f32> {
     let hd = config.hidden_size;
     let vs = config.vocab_size;
@@ -466,7 +481,7 @@ pub fn model_forward(
 
     // 2. Through all transformer layers
     for layer_idx in 0..config.num_hidden_layers {
-        transformer_layer_forward(model, config, layer_idx, buffers, use_kv_cache);
+        transformer_layer_forward(model, config, layer_idx, buffers, use_kv_cache, col_major);
     }
 
     // Advance position counter once per token

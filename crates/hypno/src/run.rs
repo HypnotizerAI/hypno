@@ -102,7 +102,7 @@ fn generate(
     buffers.reset_cache();
 
     // Batch prefill: process all prompt tokens in a single forward pass
-    let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache);
+    let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache, model.is_col_major());
     let prefill_elapsed = prefill_start.elapsed();
     let prompt_tps = token_ids.len() as f64 / prefill_elapsed.as_secs_f64().max(0.001);
 
@@ -123,7 +123,7 @@ fn generate(
         generated_tokens.push(next_token);
         print!("{}", tokenizer.decode(&[next_token]));
         io::stdout().flush()?;
-        logits = model_forward(model, config, next_token, buffers, true);
+        logits = model_forward(model, config, next_token, buffers, true, model.is_col_major());
     }
 
     let gen_elapsed = gen_start.elapsed();
@@ -158,7 +158,7 @@ fn interactive_mode(
         println!("  [{} tokens]", token_ids.len());
 
         // Batch prefill: process all prompt tokens in a single forward pass
-        let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache);
+        let mut logits = turbo::batch_forward(model, config, &token_ids, &mut buffers.kv_cache, model.is_col_major());
 
         let mut rng = XorShift64::new(args.seed.wrapping_add(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -174,7 +174,7 @@ fn interactive_mode(
             gen_count += 1;
             print!("{}", tokenizer.decode(&[next_token]));
             io::stdout().flush()?;
-            logits = model_forward(model, config, next_token, buffers, true);
+            logits = model_forward(model, config, next_token, buffers, true, model.is_col_major());
         }
         println!("\n  [{} tokens generated]\n", gen_count);
     }

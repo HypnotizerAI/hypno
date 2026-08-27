@@ -24,6 +24,7 @@ pub fn batch_forward(
     config: &HypnoConfig,
     token_ids: &[u32],
     kv_cache: &mut FlatKVCache,
+    col_major: bool,
 ) -> Vec<f32> {
     let hd = config.hidden_size;
     let batch = token_ids.len();
@@ -94,17 +95,17 @@ pub fn batch_forward(
         // ── QKV projections (per-token, multi-threaded) ──
         let qw = get_weight(model, &format!("{}self_attn.q_proj.weight", prefix));
         if let Some((qw_data, qdt)) = qw {
-            batch_matmul(&mut q, qw_data, qdt, &normed, nh * hdim, hd, batch);
+            batch_matmul(&mut q, qw_data, qdt, &normed, nh * hdim, hd, batch, col_major);
         }
 
         let kw = get_weight(model, &format!("{}self_attn.k_proj.weight", prefix));
         if let Some((kw_data, kdt)) = kw {
-            batch_matmul(&mut k, kw_data, kdt, &normed, nkv * hdim, hd, batch);
+            batch_matmul(&mut k, kw_data, kdt, &normed, nkv * hdim, hd, batch, col_major);
         }
 
         let vw = get_weight(model, &format!("{}self_attn.v_proj.weight", prefix));
         if let Some((vw_data, vdt)) = vw {
-            batch_matmul(&mut v, vw_data, vdt, &normed, nkv * hdim, hd, batch);
+            batch_matmul(&mut v, vw_data, vdt, &normed, nkv * hdim, hd, batch, col_major);
         }
 
         // ── RoPE (per token, per head) ──
@@ -185,7 +186,7 @@ pub fn batch_forward(
         let ow = get_weight(model, &format!("{}self_attn.o_proj.weight", prefix));
         let mut o_proj_buf = vec![0.0f32; batch * hd];
         if let Some((ow_data, odt)) = ow {
-            batch_matmul(&mut o_proj_buf, ow_data, odt, &attn_out, hd, hd, batch);
+            batch_matmul(&mut o_proj_buf, ow_data, odt, &attn_out, hd, hd, batch, col_major);
         } else {
             o_proj_buf.copy_from_slice(&attn_out);
         }
@@ -224,13 +225,13 @@ pub fn batch_forward(
         // gate_proj
         let gw = get_weight(model, &format!("{}mlp.gate_proj.weight", prefix));
         if let Some((gw_data, gdt)) = gw {
-            batch_matmul(&mut ffn_gate, gw_data, gdt, &normed, im, hd, batch);
+            batch_matmul(&mut ffn_gate, gw_data, gdt, &normed, im, hd, batch, col_major);
         }
 
         // up_proj
         let uw = get_weight(model, &format!("{}mlp.up_proj.weight", prefix));
         if let Some((uw_data, udt)) = uw {
-            batch_matmul(&mut ffn_up, uw_data, udt, &normed, im, hd, batch);
+            batch_matmul(&mut ffn_up, uw_data, udt, &normed, im, hd, batch, col_major);
         }
 
         // SiLU gate + multiply
@@ -241,7 +242,7 @@ pub fn batch_forward(
         // down_proj
         let dw = get_weight(model, &format!("{}mlp.down_proj.weight", prefix));
         if let Some((dw_data, ddt)) = dw {
-            batch_matmul(&mut ffn_down, dw_data, ddt, &ffn_gate, hd, im, batch);
+            batch_matmul(&mut ffn_down, dw_data, ddt, &ffn_gate, hd, im, batch, col_major);
         }
 
         // Residual add
@@ -303,7 +304,7 @@ fn batch_rms_norm(out: &mut [f32], inp: &[f32], weight: &[f32], dim: usize, _bat
 /// Batched matrix-vector multiply: Y = W @ X, where X is [dim × batch] and Y is [n × batch].
 fn batch_matmul(
     y: &mut [f32], w: &[u8], dtype: DType, x: &[f32],
-    n: usize, dim: usize, _batch: usize,
+    n: usize, dim: usize, _batch: usize, col_major: bool,
 ) {
     use rayon::prelude::*;
     match dtype {
@@ -319,9 +320,15 @@ fn batch_matmul(
             });
         }
         DType::Q4_0 | DType::Q8_0 => {
-            y.par_chunks_mut(n).zip(x.par_chunks(dim)).for_each(|(y_chunk, x_chunk)| {
-                crate::kernels::matmul_q4_0(y_chunk, w, x_chunk, None, n, dim);
-            });
+            if col_major {
+                y.par_chunks_mut(n).zip(x.par_chunks(dim)).for_each(|(y_chunk, x_chunk)| {
+                    crate::kernels::matmul_q4_0_col(y_chunk, w, x_chunk, None, n, dim);
+                });
+            } else {
+                y.par_chunks_mut(n).zip(x.par_chunks(dim)).for_each(|(y_chunk, x_chunk)| {
+                    crate::kernels::matmul_q4_0(y_chunk, w, x_chunk, None, n, dim);
+                });
+            }
         }
     }
 }
@@ -455,14 +462,14 @@ mod tests {
             config.max_position_embeddings,
             config.head_dim,
         );
-        let turbo_logits = batch_forward(&model, &config, &token_ids, &mut turbo_cache);
+        let turbo_logits = batch_forward(&model, &config, &token_ids, &mut turbo_cache, false);
 
         // ── Path B: token-by-token model_forward ──
         let mut buffers = ForwardBuffers::new(&config);
         buffers.reset_cache();
         let mut seq_logits = Vec::new();
         for &tid in &token_ids {
-            seq_logits = transformer::model_forward(&model, &config, tid, &mut buffers, true);
+            seq_logits = transformer::model_forward(&model, &config, tid, &mut buffers, true, false);
         }
 
         // Compare logits — should be identical within floating point error
@@ -519,7 +526,7 @@ mod tests {
         let x: Vec<f32> = (0..dim).map(|i| ((i + 1) as f32) * 0.1).collect();
 
         let mut y_batch = vec![0.0f32; n];
-        batch_matmul(&mut y_batch, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, 1);
+        batch_matmul(&mut y_batch, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, 1, false);
 
         let mut y_direct = vec![0.0f32; n];
         crate::kernels::matmul_f32(&mut y_direct, &w, &x, None, n, dim);
@@ -604,7 +611,7 @@ mod tests {
 
         let q_batch = {
             let mut y = vec![0.0f32; q_dim];
-            batch_matmul(&mut y, q_weight.0, q_weight.1, &norm_batch, q_dim, hd, 1);
+            batch_matmul(&mut y, q_weight.0, q_weight.1, &norm_batch, q_dim, hd, 1, false);
             y
         };
 
@@ -640,12 +647,12 @@ mod tests {
             config.num_hidden_layers, config.num_key_value_heads,
             config.max_position_embeddings, config.head_dim,
         );
-        let batch_logits = batch_forward(&model, &config, &token_ids, &mut cache_a);
+        let batch_logits = batch_forward(&model, &config, &token_ids, &mut cache_a, false);
 
         // Token-by-token path
         let mut buffers = ForwardBuffers::new(&config);
         buffers.reset_cache();
-        let seq_logits = transformer::model_forward(&model, &config, 42, &mut buffers, true);
+        let seq_logits = transformer::model_forward(&model, &config, 42, &mut buffers, true, false);
 
         assert_eq!(batch_logits.len(), seq_logits.len());
         let mut max_diff = 0.0f32;
@@ -677,7 +684,7 @@ mod tests {
         );
         assert_eq!(cache.seq_len(), 0);
 
-        batch_forward(&model, &config, &token_ids, &mut cache);
+        batch_forward(&model, &config, &token_ids, &mut cache, false);
 
         // After batch prefill, cache_pos should equal batch size
         assert_eq!(cache.seq_len(), token_ids.len(),
@@ -737,7 +744,7 @@ mod tests {
         // X: 3 rows of [x0, x1]
         let x = vec![1.0f32, 0.0, 0.0, 1.0, 3.0, 4.0];
         let mut y = vec![0.0f32; batch * n];
-        batch_matmul(&mut y, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, batch);
+        batch_matmul(&mut y, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, batch, false);
         // Batch 0: [1,0] → [1*1+0*0, 1*0+0*2] = [1, 0]
         assert!((y[0] - 1.0).abs() < 0.001);
         assert!((y[1] - 0.0).abs() < 0.001);
@@ -770,7 +777,7 @@ mod tests {
         let w: Vec<f32> = vec![1.0, 2.0, 3.0]; // 1×3
         let x = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 5.0, 5.0, 5.0];
         let mut y = vec![0.0f32; batch * n];
-        batch_matmul(&mut y, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, batch);
+        batch_matmul(&mut y, bytemuck::cast_slice(&w), DType::FP32, &x, n, dim, batch, false);
         assert!((y[0] - 1.0).abs() < 0.001);
         assert!((y[1] - 2.0).abs() < 0.001);
         assert!((y[2] - 3.0).abs() < 0.001);

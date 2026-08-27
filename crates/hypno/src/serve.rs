@@ -202,7 +202,7 @@ async fn stream_chat(state: Arc<AppState>, req: ChatRequest, prompt: String, mod
             generated += 1;
             let text = st.tokenizer.decode(&[next]);
             if !text.is_empty() && tx.blocking_send(StreamChunk::Content(text)).is_err() { return; }
-            logits = model_forward(st.model.as_ref(), st.config.as_ref(), next, &mut buffers, true);
+            logits = model_forward(st.model.as_ref(), st.config.as_ref(), next, &mut buffers, true, st.model.is_col_major());
         }
         if generated == params.max_tokens && params.max_tokens > 0 { finish_reason = "length".to_string(); }
         let _ = tx.blocking_send(StreamChunk::Finish(finish_reason));
@@ -226,7 +226,7 @@ fn prefill(state: &AppState, prompt: &str, buffers: &mut ForwardBuffers) -> (Vec
     let prompt_tokens = token_ids.len();
     buffers.reset_cache();
     let mut logits = Vec::new();
-    for &tid in &token_ids { logits = model_forward(state.model.as_ref(), state.config.as_ref(), tid, buffers, true); }
+    for &tid in &token_ids { logits = model_forward(state.model.as_ref(), state.config.as_ref(), tid, buffers, true, state.model.is_col_major()); }
     (logits, prompt_tokens)
 }
 
@@ -242,7 +242,7 @@ fn generate_completion(state: &AppState, prompt: &str, params: &GenParams, buffe
         if Some(next) == state.tokenizer.eos_token_id() { finish_reason = "stop".to_string(); break; }
         completion_tokens += 1;
         text.push_str(&state.tokenizer.decode(&[next]));
-        logits = model_forward(state.model.as_ref(), state.config.as_ref(), next, buffers, true);
+        logits = model_forward(state.model.as_ref(), state.config.as_ref(), next, buffers, true, state.model.is_col_major());
     }
     if completion_tokens == params.max_tokens && params.max_tokens > 0 { finish_reason = "length".to_string(); }
     Generation { text, prompt_tokens, completion_tokens, finish_reason }
